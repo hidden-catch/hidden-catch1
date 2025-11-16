@@ -24,9 +24,8 @@ src/backend
 ## 시작하기
 1. **의존성 설치**
    ```bash
-   uv pip install -r pyproject.toml
+   uv sync
    ```
-   (uv를 사용하지 않는다면 `pip install -r requirements.txt` 형태로 변환 후 설치)
 
 2. **환경 변수 설정**
    - `.env` 파일에 아래와 같이 필요한 값을 정의합니다.
