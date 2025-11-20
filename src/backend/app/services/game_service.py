@@ -1,10 +1,10 @@
 from datetime import datetime, timedelta
 
-from fastapi import Depends
-from sqlalchemy import text
-from sqlalchemy.orm import Session
+from fastapi import Depends, HTTPException
+from sqlalchemy.orm import Session, selectinload
 
 from app.db.session import get_db
+from app.models import Game, GameStage, GameStageHit, GameUploadSlot
 from app.schemas.game import (
     CreateGameRequest,
     CreateGameResponse,
@@ -21,8 +21,10 @@ from app.schemas.game import (
 from app.schemas.puzzle import (
     CheckAnswerRequest,
     CheckAnswerResponse,
+    DifferenceInfo,
     PuzzleForGameResponse,
 )
+from app.tasks.detect_objects import detect_objects_for_slot
 
 
 class GameService:
@@ -30,22 +32,46 @@ class GameService:
         self.session = session
 
     def create_game(self, payload: CreateGameRequest) -> CreateGameResponse:
-        # Health-check query to ensure the PostgreSQL connection is alive.
-        self.session.execute(text("SELECT 1"))
+        game = Game(
+            mode=payload.mode,
+            difficulty=payload.difficulty,
+            status="waiting_upload",
+            time_limit_seconds=payload.time_limit_seconds,
+        )
+        self.session.add(game)
+        self.session.flush()  # assign ID before creating slots
 
         now = datetime.now()
-        slots = [
-            UploadSlot(
-                slot=i + 1,
-                presigned_url=f"https://s3.example.com/upload/{i + 1}",
-                expires_at=now + timedelta(minutes=15),
-            )
-            for i in range(payload.requested_slot_count)
-        ]
-        slot_statuses = [UploadSlotStatus(slot=slot.slot) for slot in slots]
+        slots: list[UploadSlot] = []
+        slot_statuses: list[UploadSlotStatus] = []
 
+        for index in range(payload.requested_slot_count):
+            slot_number = index + 1
+            expires_at = now + timedelta(minutes=15)
+            presigned_url = (
+                f"https://s3.example.com/uploads/game-{game.id}/slot-{slot_number}"
+            )
+
+            upload_slot = GameUploadSlot(
+                game_id=game.id,
+                slot_number=slot_number,
+                presigned_url=presigned_url,
+                expires_at=expires_at,
+            )
+            self.session.add(upload_slot)
+
+            slots.append(
+                UploadSlot(
+                    slot=slot_number,
+                    presigned_url=presigned_url,
+                    expires_at=expires_at,
+                )
+            )
+            slot_statuses.append(UploadSlotStatus(slot=slot_number))
+
+        self.session.commit()
         return CreateGameResponse(
-            game_id=1,
+            game_id=game.id,
             mode=payload.mode,
             difficulty=payload.difficulty,
             status="waiting_upload",
@@ -57,13 +83,45 @@ class GameService:
     def mark_upload_complete(
         self, game_id: int, data: UploadCompleteRequest
     ) -> UploadSlotsStatusResponse:
+        slot = (
+            self.session.query(GameUploadSlot)
+            .filter(
+                GameUploadSlot.game_id == game_id,
+                GameUploadSlot.slot_number == data.slot,
+            )
+            .one_or_none()
+        )
+        if slot is None:
+            raise HTTPException(status_code=404, detail="Upload slot not found")
+
+        slot.uploaded = True
+        slot.s3_object_key = slot.s3_object_key or (
+            f"games/{game_id}/slot-{slot.slot_number}.png"
+        )
+        slot.analysis_status = "pending"
+        slot.analysis_error = None
+        slot.detected_objects = None
+        slot.last_analyzed_at = None
+        self.session.commit()
+        detect_objects_for_slot.delay(slot.id)
+
+        slots = (
+            self.session.query(GameUploadSlot)
+            .filter(GameUploadSlot.game_id == game_id)
+            .order_by(GameUploadSlot.slot_number)
+            .all()
+        )
         status = [
             UploadSlotStatus(
-                slot=i,
-                s3_object_key=f"games/{game_id}/slot-{i}.png",
-                uploaded=i <= data.slot,
+                slot=s.slot_number,
+                s3_object_key=s.s3_object_key,
+                uploaded=s.uploaded,
+                analysis_status=s.analysis_status,
+                analysis_error=s.analysis_error,
+                detected_objects=s.detected_objects,
+                last_analyzed_at=s.last_analyzed_at,
             )
-            for i in range(1, 6)
+            for s in slots
         ]
         return UploadSlotsStatusResponse(
             game_id=game_id,
@@ -72,13 +130,23 @@ class GameService:
         )
 
     def get_upload_status(self, game_id: int) -> UploadSlotsStatusResponse:
+        slots = (
+            self.session.query(GameUploadSlot)
+            .filter(GameUploadSlot.game_id == game_id)
+            .order_by(GameUploadSlot.slot_number)
+            .all()
+        )
         status = [
             UploadSlotStatus(
-                slot=i,
-                s3_object_key=f"games/{game_id}/slot-{i}.png",
-                uploaded=False,
+                slot=slot.slot_number,
+                s3_object_key=slot.s3_object_key,
+                uploaded=slot.uploaded,
+                analysis_status=slot.analysis_status,
+                analysis_error=slot.analysis_error,
+                detected_objects=slot.detected_objects,
+                last_analyzed_at=slot.last_analyzed_at,
             )
-            for i in range(1, 6)
+            for slot in slots
         ]
         return UploadSlotsStatusResponse(
             game_id=game_id,
@@ -87,38 +155,112 @@ class GameService:
         )
 
     def get_game_detail(self, game_id: int) -> GameDetailResponse:
-        now = datetime.now()
-        return GameDetailResponse(
-            game_id=game_id,
-            mode="single",
-            difficulty="easy",
-            status="playing",
-            created_at=now - timedelta(minutes=5),
-            updated_at=now,
-            puzzle=PuzzleForGameResponse(
-                puzzle_id=10,
-                modified_image_url="https://s3.example.com/puzzles/10.png",
-                width=1024,
-                height=768,
-                total_difference_count=7,
+        game = (
+            self.session.query(Game)
+            .options(
+                selectinload(Game.stages).selectinload(GameStage.puzzle),
+                selectinload(Game.stages)
+                .selectinload(GameStage.hits)
+                .selectinload(GameStageHit.difference),
+            )
+            .filter(Game.id == game_id)
+            .one_or_none()
+        )
+        if game is None:
+            raise HTTPException(status_code=404, detail="Game not found")
+
+        current_stage = next(
+            (
+                stage
+                for stage in game.stages
+                if stage.status in ("waiting_puzzle", "playing")
             ),
-            current_score=1200,
-            current_stage=2,
-            total_stages=5,
+            game.stages[-1] if game.stages else None,
+        )
+        current_stage_number = current_stage.stage_number if current_stage else 0
+        puzzle = current_stage.puzzle if current_stage else None
+        puzzle_schema = (
+            PuzzleForGameResponse(
+                puzzle_id=puzzle.id,
+                modified_image_url=puzzle.modified_image_url,
+                width=puzzle.width,
+                height=puzzle.height,
+                total_difference_count=len(puzzle.differences),
+            )
+            if puzzle
+            else None
+        )
+
+        return GameDetailResponse(
+            game_id=game.id,
+            mode=game.mode,
+            difficulty=game.difficulty,
+            status=game.status,
+            created_at=game.created_at,
+            updated_at=game.updated_at,
+            puzzle=puzzle_schema,
+            current_score=game.current_score,
+            current_stage=current_stage_number,
+            total_stages=len(game.stages),
         )
 
     def check_answer(
         self, game_id: int, stage_number: int, payload: CheckAnswerRequest
     ) -> CheckAnswerResponse:
-        return CheckAnswerResponse(
+        stage = (
+            self.session.query(GameStage)
+            .options(
+                selectinload(GameStage.puzzle),
+                selectinload(GameStage.hits).selectinload(GameStageHit.difference),
+                selectinload(GameStage.game),
+            )
+            .filter(
+                GameStage.game_id == game_id,
+                GameStage.stage_number == stage_number,
+            )
+            .one_or_none()
+        )
+        if stage is None:
+            raise HTTPException(status_code=404, detail="Stage not found")
+        if stage.puzzle is None:
+            raise HTTPException(status_code=400, detail="Puzzle not ready")
+
+        matched = self._match_difference(stage.puzzle.differences, payload.x, payload.y)
+        total_diffs = stage.total_difference_count or len(stage.puzzle.differences)
+
+        if matched is None:
+            return self._build_check_answer_response(
+                stage,
+                is_correct=False,
+                total_difference_count=total_diffs,
+            )
+
+        already_hit_ids = {hit.difference_id for hit in stage.hits if hit.difference_id}
+        if matched.id in already_hit_ids:
+            return self._build_check_answer_response(
+                stage,
+                is_correct=False,
+                is_already_found=True,
+                total_difference_count=total_diffs,
+            )
+
+        hit = GameStageHit(stage_id=stage.id, difference_id=matched.id)
+        stage.hits.append(hit)
+        stage.found_difference_count += 1
+        stage.game.current_score += 100
+        if stage.total_difference_count is None:
+            stage.total_difference_count = total_diffs
+
+        self.session.add(hit)
+        self.session.commit()
+        self.session.refresh(hit)
+
+        return self._build_check_answer_response(
+            stage,
             is_correct=True,
-            is_already_found=False,
-            current_score=1300,
-            found_difference_count=3,
-            total_difference_count=7,
-            game_status="playing",
-            newly_hit_difference=None,
-            found_differences=[],
+            newly_hit=matched,
+            hit_record=hit,
+            total_difference_count=total_diffs,
         )
 
     def complete_stage(
@@ -127,21 +269,57 @@ class GameService:
         stage_number: int,
         payload: StageCompleteRequest,
     ) -> StageResultResponse:
+        stage = (
+            self.session.query(GameStage)
+            .options(
+                selectinload(GameStage.puzzle),
+                selectinload(GameStage.game).selectinload(Game.upload_slots),
+            )
+            .filter(
+                GameStage.game_id == game_id,
+                GameStage.stage_number == stage_number,
+            )
+            .one_or_none()
+        )
+        if stage is None:
+            raise HTTPException(status_code=404, detail="Stage not found")
+
+        stage.status = "finished"
+        stage.completed_at = datetime.now()
+        if stage.total_difference_count is None and stage.puzzle is not None:
+            stage.total_difference_count = len(stage.puzzle.differences)
+
+        next_stage = (
+            self.session.query(GameStage)
+            .options(selectinload(GameStage.puzzle))
+            .filter(
+                GameStage.game_id == game_id,
+                GameStage.stage_number == stage_number + 1,
+            )
+            .one_or_none()
+        )
+        next_puzzle_schema = None
+        if next_stage and next_stage.puzzle:
+            next_puzzle_schema = PuzzleForGameResponse(
+                puzzle_id=next_stage.puzzle.id,
+                modified_image_url=next_stage.puzzle.modified_image_url,
+                width=next_stage.puzzle.width,
+                height=next_stage.puzzle.height,
+                total_difference_count=len(next_stage.puzzle.differences),
+            )
+            next_stage.status = "playing"
+
+        self.session.commit()
+
         return StageResultResponse(
             game_id=game_id,
             stage_number=stage_number,
-            total_stages=5,
-            status="playing",
-            current_score=1500,
-            found_difference_count=5,
-            total_difference_count=7,
-            next_puzzle=PuzzleForGameResponse(
-                puzzle_id=stage_number + 1,
-                modified_image_url=f"https://s3.example.com/puzzles/{stage_number + 1}.png",
-                width=1024,
-                height=768,
-                total_difference_count=6,
-            ),
+            total_stages=len(stage.game.stages),
+            status=stage.game.status,
+            current_score=stage.game.current_score,
+            found_difference_count=stage.found_difference_count,
+            total_difference_count=stage.total_difference_count or 0,
+            next_puzzle=next_puzzle_schema,
         )
 
     def finish_game(
@@ -156,6 +334,64 @@ class GameService:
             final_score=2000,
             found_difference_count=25,
             total_difference_count=30,
+        )
+
+    def _match_difference(self, differences, x: float, y: float):
+        for diff in differences:
+            if (
+                diff.x <= x <= diff.x + diff.width
+                and diff.y <= y <= diff.y + diff.height
+            ):
+                return diff
+        return None
+
+    def _build_check_answer_response(
+        self,
+        stage: GameStage,
+        *,
+        is_correct: bool,
+        is_already_found: bool = False,
+        newly_hit=None,
+        hit_record: GameStageHit | None = None,
+        total_difference_count: int,
+    ) -> CheckAnswerResponse:
+        found_infos: list[DifferenceInfo] = []
+        for hit in stage.hits:
+            if hit.difference is None:
+                continue
+            found_infos.append(
+                DifferenceInfo(
+                    difference_id=hit.difference.id,
+                    x=hit.difference.x,
+                    y=hit.difference.y,
+                    width=hit.difference.width,
+                    height=hit.difference.height,
+                    label=hit.difference.label,
+                    hit_at=hit.hit_at,
+                )
+            )
+
+        newly_hit_info = None
+        if newly_hit and hit_record:
+            newly_hit_info = DifferenceInfo(
+                difference_id=newly_hit.id,
+                x=newly_hit.x,
+                y=newly_hit.y,
+                width=newly_hit.width,
+                height=newly_hit.height,
+                label=newly_hit.label,
+                hit_at=hit_record.hit_at,
+            )
+
+        return CheckAnswerResponse(
+            is_correct=is_correct,
+            is_already_found=is_already_found,
+            current_score=stage.game.current_score,
+            found_difference_count=stage.found_difference_count,
+            total_difference_count=total_difference_count,
+            game_status=stage.game.status,
+            newly_hit_difference=newly_hit_info,
+            found_differences=found_infos,
         )
 
 

@@ -4,7 +4,7 @@ from typing import Literal
 from pydantic import BaseModel, Field
 
 from app.schemas.puzzle import PuzzleForGameResponse
-from app.schemas.types import Difficulty, GameStatus
+from app.schemas.types import Difficulty, GameStatus, UploadAnalysisStatus
 
 MAX_UPLOAD_SLOTS = 5
 
@@ -28,6 +28,42 @@ class UploadSlotStatus(BaseModel):
         description="서버가 슬롯에 매핑한 S3 객체 키",
     )
     uploaded: bool = Field(default=False, description="업로드 완료 여부")
+    analysis_status: UploadAnalysisStatus = Field(
+        default="pending",
+        description="Vision 분석 진행 상태",
+    )
+    analysis_error: str | None = Field(
+        default=None,
+        description="분석 실패 시 오류 메시지",
+    )
+    detected_objects: list["DetectedObject"] | None = Field(
+        default=None,
+        description="Vision API에서 반환된 오브젝트 목록",
+    )
+    last_analyzed_at: datetime | None = Field(
+        default=None,
+        description="마지막 분석 완료 시각",
+    )
+
+
+class DetectedVertex(BaseModel):
+    """Vision API에서 반환한 Vertex"""
+
+    x: float = Field(..., description="정규화된 X 좌표(0~1)")
+    y: float = Field(..., description="정규화된 Y 좌표(0~1)")
+
+
+class DetectedObject(BaseModel):
+    """Vision API가 탐지한 오브젝트"""
+
+    name: str = Field(..., description="탐지된 오브젝트명")
+    score: float = Field(..., description="확신도(0~1)")
+    vertices: list[DetectedVertex] = Field(
+        default_factory=list, description="bounding poly vertex 목록"
+    )
+
+
+UploadSlotStatus.model_rebuild()
 
 
 class CreateGameRequest(BaseModel):
