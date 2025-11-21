@@ -65,6 +65,7 @@ class PuzzleForGameResponse(BaseModel):
     """특정 스테이지에서 사용할 퍼즐 정보를 게임에 전달"""
 
     puzzle_id: int = Field(..., description="해당 스테이지에 할당된 퍼즐 ID")
+    original_image_url: str = Field(..., description="원본 이미지 S3 URL")
     modified_image_url: str = Field(..., description="수정본 이미지 S3 URL")
     width: float = Field(..., description="이미지 너비(px)")
     height: float = Field(..., description="이미지 높이(px)")
