@@ -24,7 +24,6 @@ from app.schemas.puzzle import (
     DifferenceInfo,
     PuzzleForGameResponse,
 )
-from app.tasks.detect_objects import detect_objects_for_slot
 
 
 class GameService:
