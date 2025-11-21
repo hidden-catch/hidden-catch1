@@ -102,10 +102,6 @@ class CreateGameResponse(BaseModel):
         ...,
         description="각 슬롯의 presigned URL 목록",
     )
-    slot_statuses: list[UploadSlotStatus] = Field(
-        default_factory=list,
-        description="슬롯별 업로드 진행 상태",
-    )
     time_limit_seconds: int = Field(..., description="제한 시간(초)")
 
 
