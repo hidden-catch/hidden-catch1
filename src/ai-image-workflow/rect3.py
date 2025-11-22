@@ -28,14 +28,13 @@ def find_game_objects_normalized(image_path):
     image_part = Part.from_data(data=image_bytes, mime_type="image/jpeg")
 
     # 3. [수정됨] 정규화(0.0 ~ 1.0) 좌표를 요청하는 프롬프트
+    # **Selection Criteria:**
+    # 1. Select objects that are clearly visible and distinct from the background.
+    # 2. EXCLUDE objects that are too small, blurry, or have complex/ambiguous boundaries.
+    # 3. Focus on objects where a change (e.g., color change, removal, replacement) would be noticeable.
     prompt = """
     You are an expert Game Level Designer for a "Spot the Difference" puzzle game.
     Your task is to analyze the image and identify 5 distinct objects to modify.
-
-    **Selection Criteria:**
-    1. Select objects that are clearly visible and distinct from the background.
-    2. EXCLUDE objects that are too small, blurry, or have complex/ambiguous boundaries.
-    3. Focus on objects where a change (e.g., color change, removal, replacement) would be noticeable.
 
     **Output Requirements:**
     1. Provide the output STRICTLY in valid JSON format.

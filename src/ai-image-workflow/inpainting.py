@@ -1,6 +1,9 @@
 from vertexai.preview.vision_models import Image, ImageGenerationModel
 from PIL import Image as PILImage, ImageDraw, ImageFilter
 import io
+import os
+
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = "vertex_ai/key.json"
 
 def modify_image_with_imagen(original_image_path, detection_results):
     """
