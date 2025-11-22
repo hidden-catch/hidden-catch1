@@ -194,5 +194,3 @@ class FinishGameResponse(BaseModel):
         description="게임 난이도",
     )
     final_score: int = Field(..., description="최종 점수")
-    found_difference_count: int = Field(..., description="찾은 개수")
-    total_difference_count: int = Field(..., description="전체 개수")
