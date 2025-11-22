@@ -30,7 +30,11 @@ class GameUploadSlot(Base):
         DateTime(timezone=True),
         nullable=False,
     )
-    s3_object_key: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    s3_object_key: Mapped[dict | None] = mapped_column(
+        sqltypes.JSON().with_variant(JSONB, "postgresql"),
+        nullable=True,
+        comment="{'original': 's3_key', 'modified': 's3_key'}",
+    )
     uploaded: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     analysis_status: Mapped[str] = mapped_column(
         String(32), default="pending", nullable=False

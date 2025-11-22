@@ -1,6 +1,9 @@
 # Created by https://www.toptal.com/developers/gitignore/api/macos,python,visualstudiocode
 # Edit at https://www.toptal.com/developers/gitignore?templates=macos,python,visualstudiocode
 
+# vertex_ai key file
+vertex_ai/
+
 ### macOS ###
 # General
 .DS_Store
