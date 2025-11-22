@@ -25,6 +25,7 @@ from app.schemas.puzzle import (
     CheckAnswerRequest,
     CheckAnswerResponse,
     DifferenceInfo,
+    HitAttempt,
     PuzzleForGameResponse,
 )
 
@@ -46,18 +47,22 @@ class GameService:
         self.s3_client = s3_client or _S3_CLIENT
 
     def _build_slot_key(self, game_id: int, slot_number: int) -> str:
-        prefix = settings.s3_upload_prefix.strip("/")
+        prefix = settings.aws_s3_upload_prefix.strip("/")
         key_suffix = f"game-{game_id}/slot-{slot_number}.png"
         return f"{prefix}/{key_suffix}" if prefix else key_suffix
 
     def _generate_presigned_upload_url(self, object_key: str) -> str:
-        if not settings.s3_bucket_name:
+        if not settings.aws_s3_bucket_name:
             raise HTTPException(status_code=500, detail="S3 bucket is not configured")
-        ttl = settings.s3_presign_ttl_seconds if settings.s3_presign_ttl_seconds > 0 else 900
+        ttl = (
+            settings.aws_s3_presign_ttl_seconds
+            if settings.aws_s3_presign_ttl_seconds > 0
+            else 900
+        )
         return self.s3_client.generate_presigned_url(
             ClientMethod="put_object",
             Params={
-                "Bucket": settings.s3_bucket_name,
+                "Bucket": settings.aws_s3_bucket_name,
                 "Key": object_key,
                 "ContentType": "image/png",
             },
@@ -72,13 +77,13 @@ class GameService:
             time_limit_seconds=payload.time_limit_seconds,
         )
         self.session.add(game)
-        self.session.flush()  # assign ID before creating slots
+        self.session.flush()
 
         now = datetime.now()
         slots: list[UploadSlot] = []
         ttl_seconds = (
-            settings.s3_presign_ttl_seconds
-            if settings.s3_presign_ttl_seconds > 0
+            settings.aws_s3_presign_ttl_seconds
+            if settings.aws_s3_presign_ttl_seconds > 0
             else 900
         )
         for index in range(payload.requested_slot_count):
@@ -136,7 +141,7 @@ class GameService:
         slot.detected_objects = None
         slot.last_analyzed_at = None
         self.session.commit()
-        detect_objects_for_slot.delay(slot.id)
+        # detect_objects_for_slot.delay(slot.id)
 
         slots = (
             self.session.query(GameUploadSlot)
@@ -144,6 +149,13 @@ class GameService:
             .order_by(GameUploadSlot.slot_number)
             .all()
         )
+        all_uploaded = all(s.uploaded for s in slots)
+        game = self.session.query(Game).filter(Game.id == game_id).one_or_none()
+        if game is None:
+            raise HTTPException(status_code=404, detail="Game not found")
+        if all_uploaded and game.status == "waiting_upload":
+            game.status = "waiting_puzzle"
+
         status = [
             UploadSlotStatus(
                 slot=s.slot_number,
@@ -156,9 +168,11 @@ class GameService:
             )
             for s in slots
         ]
+        self.session.commit()
+
         return UploadSlotsStatusResponse(
             game_id=game_id,
-            status="waiting_puzzle",
+            status=game.status,
             slot_statuses=status,
         )
 
@@ -259,12 +273,14 @@ class GameService:
         if stage.puzzle is None:
             raise HTTPException(status_code=400, detail="Puzzle not ready")
 
+        attempt = HitAttempt(x=payload.x, y=payload.y)
         matched = self._match_difference(stage.puzzle.differences, payload.x, payload.y)
         total_diffs = stage.total_difference_count or len(stage.puzzle.differences)
 
         if matched is None:
             return self._build_check_answer_response(
                 stage,
+                attempt=attempt,
                 is_correct=False,
                 total_difference_count=total_diffs,
             )
@@ -273,6 +289,7 @@ class GameService:
         if matched.id in already_hit_ids:
             return self._build_check_answer_response(
                 stage,
+                attempt=attempt,
                 is_correct=False,
                 is_already_found=True,
                 total_difference_count=total_diffs,
@@ -291,9 +308,8 @@ class GameService:
 
         return self._build_check_answer_response(
             stage,
+            attempt=attempt,
             is_correct=True,
-            newly_hit=matched,
-            hit_record=hit,
             total_difference_count=total_diffs,
         )
 
@@ -384,10 +400,9 @@ class GameService:
         self,
         stage: GameStage,
         *,
+        attempt: HitAttempt | None = None,
         is_correct: bool,
         is_already_found: bool = False,
-        newly_hit=None,
-        hit_record: GameStageHit | None = None,
         total_difference_count: int,
     ) -> CheckAnswerResponse:
         found_infos: list[DifferenceInfo] = []
@@ -406,18 +421,6 @@ class GameService:
                 )
             )
 
-        newly_hit_info = None
-        if newly_hit and hit_record:
-            newly_hit_info = DifferenceInfo(
-                difference_id=newly_hit.id,
-                x=newly_hit.x,
-                y=newly_hit.y,
-                width=newly_hit.width,
-                height=newly_hit.height,
-                label=newly_hit.label,
-                hit_at=hit_record.hit_at,
-            )
-
         return CheckAnswerResponse(
             is_correct=is_correct,
             is_already_found=is_already_found,
@@ -425,7 +428,7 @@ class GameService:
             found_difference_count=stage.found_difference_count,
             total_difference_count=total_difference_count,
             game_status=stage.game.status,
-            newly_hit_difference=newly_hit_info,
+            newly_hit_difference=attempt,
             found_differences=found_infos,
         )
 
