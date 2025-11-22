@@ -23,6 +23,13 @@ class DifferenceInfo(BaseModel):
     )
 
 
+class HitAttempt(BaseModel):
+    """사용자가 방금 터치한 좌표"""
+
+    x: float = Field(..., description="터치 좌표 X")
+    y: float = Field(..., description="터치 좌표 Y")
+
+
 class DifferenceCreate(BaseModel):
     """퍼즐 생성 시 각 Rect 정보를 등록할 때 사용"""
 
@@ -84,10 +91,10 @@ class CheckAnswerResponse(BaseModel):
         ..., description="이 스테이지 퍼즐에서 찾은 개수"
     )
     total_difference_count: int = Field(..., description="이 스테이지 퍼즐의 전체 개수")
-    game_status: GameStatus = Field(..., description="게임 상태")
-    newly_hit_difference: DifferenceInfo | None = Field(
+    game_status: str = Field(..., description="게임 상태")
+    newly_hit_difference: HitAttempt | None = Field(
         default=None,
-        description="이번 스테이지에서 새로 맞춘 차이 정보",
+        description="이번 요청에서 사용자가 터치한 좌표",
     )
     found_differences: list[DifferenceInfo] = Field(
         default_factory=list,
