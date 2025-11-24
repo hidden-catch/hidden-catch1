@@ -8,13 +8,6 @@ from app.worker.celery_app import celery_app
 # AI workflow 모듈 경로 추가
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "ai-image-workflow"))
 
-
-@celery_app.task
-def long_running_task(param: int) -> str:
-    time.sleep(10)
-    return f"Proceed {param} successfully!"
-
-
 @celery_app.task(bind=True)
 def process_uploaded_image(self, slot_id: int):
     """

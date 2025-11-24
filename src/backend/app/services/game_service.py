@@ -24,6 +24,7 @@ from app.schemas.puzzle import (
     DifferenceInfo,
     PuzzleForGameResponse,
 )
+from app.worker.tasks import process_uploaded_image
 
 
 class GameService:
@@ -94,15 +95,17 @@ class GameService:
             raise HTTPException(status_code=404, detail="Upload slot not found")
 
         slot.uploaded = True
-        slot.s3_object_key = slot.s3_object_key or (
-            f"games/{game_id}/slot-{slot.slot_number}.png"
-        )
+        slot.s3_object_key = slot.s3_object_key or {
+            "original": f"uploads/original/{game_id}/slot-{slot.slot_number}.png"
+        }
         slot.analysis_status = "pending"
         slot.analysis_error = None
         slot.detected_objects = None
         slot.last_analyzed_at = None
         self.session.commit()
-        detect_objects_for_slot.delay(slot.id)
+        
+        # Celery 태스크 비동기 실행: AI 처리 (객체 탐지 + 이미지 수정)
+        process_uploaded_image.delay(slot.id)
 
         slots = (
             self.session.query(GameUploadSlot)
