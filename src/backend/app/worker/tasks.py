@@ -109,9 +109,9 @@ def detect_objects_for_slot(slot_id: int):
                 session.add(existing_stage)
                 session.flush()
                 slot.stage_id = existing_stage.id
-                game.status = "waiting_puzzle"
+                game.status = "waiting_next_stage"
 
-        detected = []
+        detected: list[dict] = []
         index = 0
 
         stmt = delete(Difference).where(Difference.puzzle_id == puzzle.id)
@@ -143,7 +143,13 @@ def detect_objects_for_slot(slot_id: int):
             )
 
             difference = Difference(
-                puzzle_id=puzzle.id, index=index, x=x, y=y, width=width, height=height
+                puzzle_id=puzzle.id,
+                index=index,
+                x=x,
+                y=y,
+                width=width,
+                height=height,
+                label=label,
             )
 
             session.add(difference)
@@ -531,7 +537,7 @@ def process_uploaded_image(slot_id: int):
                 session.add(stage)
                 session.flush()
                 slot.stage_id = stage.id
-                game.status = "waiting_puzzle"
+                game.status = "waiting_next_stage"
                 existing_stage = stage
 
         # 이미지 가져오기
