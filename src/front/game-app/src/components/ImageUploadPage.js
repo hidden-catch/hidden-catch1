@@ -56,7 +56,7 @@ function ImageUploadPage({ onNavigate }) {
 
     try {
       // 1. 게임 생성 요청
-      const gameResponse = await fetch('/api/v1/games', {
+      const gameResponse = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -104,7 +104,7 @@ function ImageUploadPage({ onNavigate }) {
         console.log(`S3 업로드 완료 (slot ${slot.slot})`);
 
         // 3. 업로드 완료 알림
-        const completeResponse = await fetch(`/api/v1/games/${game_id}/uploads/complete`, {
+        const completeResponse = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${game_id}/uploads/complete`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -125,7 +125,7 @@ function ImageUploadPage({ onNavigate }) {
 
       // 4. 상태 폴링 (1초마다 확인)
       const pollStatus = async () => {
-        const statusResponse = await fetch(`/api/v1/games/${game_id}`);
+        const statusResponse = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${game_id}`);
         
         if (!statusResponse.ok) {
           console.error('상태 조회 실패');
@@ -166,7 +166,14 @@ function ImageUploadPage({ onNavigate }) {
         <h2>이미지 업로드</h2>
         <p className="upload-info">최대 {MAX_IMAGES}장까지 업로드 가능 (jpg, jpeg, png)</p>
         
-        <div className="upload-area">
+        <div 
+          className={`upload-area ${uploadedImages.length >= MAX_IMAGES ? 'disabled' : ''}`}
+          onClick={() => {
+            if (uploadedImages.length < MAX_IMAGES) {
+              document.getElementById('image-input')?.click();
+            }
+          }}
+        >
           <input
             type="file"
             id="image-input"
@@ -177,23 +184,42 @@ function ImageUploadPage({ onNavigate }) {
             disabled={uploadedImages.length >= MAX_IMAGES}
           />
           
-          <label 
-            htmlFor="image-input" 
-            className={`upload-label ${uploadedImages.length >= MAX_IMAGES ? 'disabled' : ''}`}
-          >
-            {uploadedImages.length >= MAX_IMAGES 
-              ? '최대 업로드 개수 도달' 
-              : '+ 이미지 업로드'}
-          </label>
-
-          <div className="preview-container">
-            {previews.map((preview, index) => (
-              <div key={index} className="preview-item">
-                <img src={preview} alt={`미리보기 ${index + 1}`} />
-                <span className="preview-number">{index + 1}</span>
+          {previews.length === 0 ? (
+            <div className="upload-empty-state">
+              <div className="upload-icon">
+                <svg width="100" height="100" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M7 18C4.23858 18 2 15.7614 2 13C2 10.2386 4.23858 8 7 8C7.33962 8 7.67482 8.02857 8.00289 8.08296C8.00329 8.05531 8.00362 8.02759 8.00388 8C8.00388 5.23858 10.2425 3 13.0039 3C15.7653 3 18.0039 5.23858 18.0039 8C18.0039 8.02759 18.0042 8.05531 18.0046 8.08296C18.3327 8.02857 18.6679 8 19.0075 8C21.769 8 24.0075 10.2386 24.0075 13C24.0075 15.7614 21.769 18 19.0075 18" stroke="#b0b0b0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                  <path d="M12 11V17M9 14H15" stroke="#b0b0b0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
               </div>
-            ))}
-          </div>
+              <p className="upload-instruction">이미지를 드래그하거나 클릭하여 업로드하세요</p>
+              <div className={`upload-label ${uploadedImages.length >= MAX_IMAGES ? 'disabled' : ''}`}>
+                {uploadedImages.length >= MAX_IMAGES 
+                  ? '최대 업로드 개수 도달' 
+                  : '+ 이미지 업로드'}
+              </div>
+            </div>
+          ) : (
+            <div className="preview-container">
+              {previews.map((preview, index) => (
+                <div key={index} className="preview-item">
+                  <img src={preview} alt={`미리보기 ${index + 1}`} />
+                  <span className="preview-number">{index + 1}</span>
+                </div>
+              ))}
+              {uploadedImages.length < MAX_IMAGES && (
+                <div 
+                  className="upload-label-small"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    document.getElementById('image-input')?.click();
+                  }}
+                >
+                  + 추가 업로드
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="button-group">
