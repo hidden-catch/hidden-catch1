@@ -25,6 +25,245 @@ from app.worker.detect import (
 )
 
 
+def _calculate_overlap_ratio(
+    child_box: dict[str, float], parent_box: dict[str, float]
+) -> float:
+    """
+    child_box가 parent_box에 얼마나 포함되어 있는지 비율을 계산합니다.
+
+    Args:
+        child_box: 자식 박스 {'x': float, 'y': float, 'width': float, 'height': float}
+        parent_box: 부모 박스 {'x': float, 'y': float, 'width': float, 'height': float}
+
+    Returns:
+        child_box 면적 대비 겹침 비율 (0.0 ~ 1.0)
+    """
+    x1, y1 = child_box["x"], child_box["y"]
+    x2 = x1 + child_box["width"]
+    y2 = y1 + child_box["height"]
+
+    px1, py1 = parent_box["x"], parent_box["y"]
+    px2 = px1 + parent_box["width"]
+    py2 = py1 + parent_box["height"]
+
+    # 교집합 영역 계산
+    inter_x1 = max(x1, px1)
+    inter_y1 = max(y1, py1)
+    inter_x2 = min(x2, px2)
+    inter_y2 = min(y2, py2)
+
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+
+    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+    child_area = child_box["width"] * child_box["height"]
+
+    if child_area == 0:
+        return 0.0
+
+    return inter_area / child_area
+
+
+def _build_rect_tree(
+    rects: list[dict[str, float]], labels: list[str], overlap_threshold: float = 0.9
+) -> list[dict]:
+    """
+    rect들 간의 포함 관계를 기반으로 트리 구조를 생성합니다.
+    90% 이상 겹치면 포함 관계로 간주합니다.
+
+    Args:
+        rects: rect 리스트 [{'x': float, 'y': float, 'width': float, 'height': float}, ...]
+        labels: 각 rect의 라벨 리스트
+        overlap_threshold: 포함 관계로 간주할 겹침 비율 (기본값: 0.9 = 90%)
+
+    Returns:
+        트리 구조 리스트 [{'rect': dict, 'label': str, 'children': list, 'index': int}, ...]
+        루트 노드들만 반환되며, 각 노드는 children 리스트를 가집니다.
+    """
+    # 면적 계산 및 인덱스와 함께 저장
+    rect_data: list[tuple[dict[str, float], str, float, int]] = []
+    for i, (rect, label) in enumerate(zip(rects, labels)):
+        area = rect["width"] * rect["height"]
+        rect_data.append((rect, label, area, i))
+
+    # 면적 내림차순으로 정렬 (큰 것부터)
+    rect_data.sort(key=lambda x: x[2], reverse=True)
+
+    # 트리 노드 생성
+    nodes: list[dict] = []
+    node_map: dict[int, dict] = {}  # index -> node
+
+    for rect, label, area, original_index in rect_data:
+        node = {
+            "rect": rect,
+            "label": label,
+            "index": original_index,
+            "children": [],
+            "parent": None,
+        }
+        nodes.append(node)
+        node_map[original_index] = node
+
+    # 각 rect에 대해 부모 찾기
+    for i, (rect, label, area, original_index) in enumerate(rect_data):
+        current_node = node_map[original_index]
+
+        # 자신보다 큰 rect들 중에서 90% 이상 포함되는 가장 작은 rect 찾기
+        best_parent = None
+        best_parent_area = float("inf")
+
+        for j in range(i):  # 자신보다 큰 rect들만 확인
+            parent_rect, parent_label, parent_area, parent_index = rect_data[j]
+            parent_node = node_map[parent_index]
+
+            # 이미 부모가 있으면 건너뛰기
+            if parent_node["parent"] is not None:
+                continue
+
+            overlap_ratio = _calculate_overlap_ratio(rect, parent_rect)
+            if overlap_ratio >= overlap_threshold:
+                # 더 작은 부모를 선택 (더 가까운 부모)
+                if parent_area < best_parent_area:
+                    best_parent = parent_node
+                    best_parent_area = parent_area
+
+        if best_parent:
+            best_parent["children"].append(current_node)
+            current_node["parent"] = best_parent
+
+    # 루트 노드들만 반환 (부모가 없는 노드들)
+    root_nodes = [node for node in nodes if node["parent"] is None]
+    return root_nodes
+
+
+def _calculate_iou(box1: dict[str, float], box2: dict[str, float]) -> float:
+    """
+    두 bounding box 간의 IoU (Intersection over Union)를 계산합니다.
+
+    Args:
+        box1: 첫 번째 박스 {'x': float, 'y': float, 'width': float, 'height': float}
+        box2: 두 번째 박스 {'x': float, 'y': float, 'width': float, 'height': float}
+
+    Returns:
+        IoU 값 (0.0 ~ 1.0). 1.0이면 완전히 겹침, 0.0이면 겹치지 않음.
+    """
+    x1_1, y1_1 = box1["x"], box1["y"]
+    x2_1 = x1_1 + box1["width"]
+    y2_1 = y1_1 + box1["height"]
+
+    x1_2, y1_2 = box2["x"], box2["y"]
+    x2_2 = x1_2 + box2["width"]
+    y2_2 = y1_2 + box2["height"]
+
+    # 교집합 영역 계산
+    inter_x1 = max(x1_1, x1_2)
+    inter_y1 = max(y1_1, y1_2)
+    inter_x2 = min(x2_1, x2_2)
+    inter_y2 = min(y2_1, y2_2)
+
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+
+    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+
+    # 각 박스의 면적
+    area1 = box1["width"] * box1["height"]
+    area2 = box2["width"] * box2["height"]
+
+    # 합집합 영역
+    union_area = area1 + area2 - inter_area
+
+    if union_area == 0:
+        return 0.0
+
+    return inter_area / union_area
+
+
+def _shrink_box_centered(
+    box: dict[str, float], shrink_ratio: float = 0.1
+) -> dict[str, float]:
+    """
+    박스를 중앙을 고정한 상태에서 크기를 축소합니다.
+
+    Args:
+        box: 축소할 박스 {'x': float, 'y': float, 'width': float, 'height': float}
+        shrink_ratio: 축소 비율 (기본값: 0.1 = 10%)
+
+    Returns:
+        축소된 박스 (중앙 고정)
+    """
+    center_x = box["x"] + box["width"] / 2
+    center_y = box["y"] + box["height"] / 2
+
+    new_width = box["width"] * (1 - shrink_ratio)
+    new_height = box["height"] * (1 - shrink_ratio)
+
+    return {
+        "x": center_x - new_width / 2,
+        "y": center_y - new_height / 2,
+        "width": new_width,
+        "height": new_height,
+    }
+
+
+def _process_rects_with_iou(
+    rects: list[dict[str, float]], labels: list[str]
+) -> tuple[list[dict[str, float] | None], list[str]]:
+    """
+    모든 rect에 대해 IoU를 계산하고 처리합니다.
+
+    Args:
+        rects: rect 리스트 [{'x': float, 'y': float, 'width': float, 'height': float}, ...]
+        labels: 각 rect의 라벨 리스트
+
+    Returns:
+        처리된 rect 리스트 (삭제된 것은 None)와 라벨 리스트
+    """
+    processed_rects: list[dict[str, float] | None] = [rect.copy() for rect in rects]
+    processed_labels = labels.copy()
+
+    # 각 rect에 대해 다른 모든 rect와의 겹침 비율 계산 (해당 rect 면적 대비)
+    for i, current_rect in enumerate(processed_rects):
+        if current_rect is None:
+            continue
+
+        current_area = current_rect["width"] * current_rect["height"]
+        max_overlap_ratio = 0.0
+
+        for j, other_rect in enumerate(processed_rects):
+            if i == j or other_rect is None:
+                continue
+
+            # 교집합 영역 계산
+            x1_1, y1_1 = current_rect["x"], current_rect["y"]
+            x2_1 = x1_1 + current_rect["width"]
+            y2_1 = y1_1 + current_rect["height"]
+
+            x1_2, y1_2 = other_rect["x"], other_rect["y"]
+            x2_2 = x1_2 + other_rect["width"]
+            y2_2 = y1_2 + other_rect["height"]
+
+            inter_x1 = max(x1_1, x1_2)
+            inter_y1 = max(y1_1, y1_2)
+            inter_x2 = min(x2_1, x2_2)
+            inter_y2 = min(y2_1, y2_2)
+
+            if inter_x2 > inter_x1 and inter_y2 > inter_y1:
+                inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                # 현재 rect 면적 대비 겹침 비율
+                overlap_ratio = inter_area / current_area if current_area > 0 else 0.0
+                max_overlap_ratio = max(max_overlap_ratio, overlap_ratio)
+
+        # 겹침 비율에 따라 처리 (해당 rect 면적 대비)
+        if max_overlap_ratio >= 0.5:  # 겹침 >= 50% → 삭제
+            processed_rects[i] = None
+        elif max_overlap_ratio >= 0.1:  # 10% <= 겹침 < 50% → 중앙 고정하고 10% 축소
+            processed_rects[i] = _shrink_box_centered(current_rect, shrink_ratio=0.1)
+        # 겹침 < 10% → 그대로 유지
+
+    return processed_rects, processed_labels
+
+
 @celery_app.task
 def long_running_task(param: int) -> str:
     time.sleep(10)
@@ -109,15 +348,12 @@ def detect_objects_for_slot(slot_id: int):
                 session.add(existing_stage)
                 session.flush()
                 slot.stage_id = existing_stage.id
-                game.status = "waiting_puzzle"
+                game.status = "waiting_next_stage"
 
-        detected = []
-        index = 0
-
-        stmt = delete(Difference).where(Difference.puzzle_id == puzzle.id)
-        session.execute(stmt)
+        # 먼저 모든 원본 rect 수집
+        original_rects: list[dict[str, float]] = []
+        original_labels: list[str] = []
         for object_ in objects:
-            index += 1
             label = object_.name
             vertices = object_.bounding_poly.normalized_vertices
 
@@ -128,11 +364,65 @@ def detect_objects_for_slot(slot_id: int):
             width = (v_max.x - v_min.x) * image_width
             height = (v_max.y - v_min.y) * image_height
 
+            original_rects.append({"x": x, "y": y, "width": width, "height": height})
+            original_labels.append(label)
+
+        # 트리 구조 생성 (90% 이상 겹치면 포함 관계)
+        tree = _build_rect_tree(original_rects, original_labels, overlap_threshold=0.9)
+
+        # 트리 구조에서 부모-자식 관계가 있는 경우 더 큰 rect(부모) 제외
+        excluded_indices: set[int] = set()
+
+        def mark_parents_for_exclusion(node: dict) -> None:
+            """부모-자식 관계에서 부모(더 큰 rect)를 제외 목록에 추가"""
+            if node["children"]:
+                # 자식이 있으면 부모(자신) 제외
+                excluded_indices.add(node["index"])
+                # 자식들도 재귀적으로 확인
+                for child in node["children"]:
+                    mark_parents_for_exclusion(child)
+
+        # 모든 루트 노드에서 시작하여 부모 제외
+        for root_node in tree:
+            mark_parents_for_exclusion(root_node)
+
+        # 제외되지 않은 rect만 필터링
+        filtered_rects: list[dict[str, float]] = []
+        filtered_labels: list[str] = []
+        for i, (rect, label) in enumerate(zip(original_rects, original_labels)):
+            if i not in excluded_indices:
+                filtered_rects.append(rect)
+                filtered_labels.append(label)
+
+        # IoU에 따라 처리 (50% 이상 삭제, 10-50% 축소, 10% 미만 유지)
+        processed_rects, processed_labels = _process_rects_with_iou(
+            filtered_rects, filtered_labels
+        )
+
+        # 처리된 rect로 Difference 생성
+        detected: list[dict] = []
+        stored_differences: list[Difference] = []
+        index = 0
+
+        stmt = delete(Difference).where(Difference.puzzle_id == puzzle.id)
+        session.execute(stmt)
+        for processed_rect, label in zip(processed_rects, processed_labels):
+            # 삭제된 rect는 건너뛰기
+            if processed_rect is None:
+                continue
+
+            index += 1
+            x = processed_rect["x"]
+            y = processed_rect["y"]
+            width = processed_rect["width"]
+            height = processed_rect["height"]
+
+            # normalized rect 계산 (0-1000 스케일)
             normalized_rect = [
-                int(v_min.y * 1000),
-                int(v_min.x * 1000),
-                int(v_max.y * 1000),
-                int(v_max.x * 1000),
+                int((y / image_height) * 1000),
+                int((x / image_width) * 1000),
+                int(((y + height) / image_height) * 1000),
+                int(((x + width) / image_width) * 1000),
             ]
 
             detected.append(
@@ -143,20 +433,25 @@ def detect_objects_for_slot(slot_id: int):
             )
 
             difference = Difference(
-                puzzle_id=puzzle.id, index=index, x=x, y=y, width=width, height=height
+                puzzle_id=puzzle.id,
+                index=index,
+                x=x,
+                y=y,
+                width=width,
+                height=height,
+                label=label,
             )
 
             session.add(difference)
             session.flush()
+            stored_differences.append(difference)
 
         debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         draw = ImageDraw.Draw(debug_image)
-        for rect in detected:
-            ymin, xmin, ymax, xmax = rect["rect"]
-            x1 = int(xmin / 1000 * image_width)
-            y1 = int(ymin / 1000 * image_height)
-            x2 = int(xmax / 1000 * image_width)
-            y2 = int(ymax / 1000 * image_height)
+        for diff in stored_differences:
+            x1, y1 = diff.x, diff.y
+            x2 = x1 + diff.width
+            y2 = y1 + diff.height
             draw.rectangle(
                 [
                     (x1, y1),
@@ -165,6 +460,12 @@ def detect_objects_for_slot(slot_id: int):
                 outline="red",
                 width=3,
             )
+            if diff.label:
+                draw.text(
+                    (x1, max(0, y1 - 12)),
+                    diff.label,
+                    fill="red",
+                )
         debug_image.show(title=f"slot-{slot_id}-detections")
 
         slot.detected_objects = detected
@@ -531,7 +832,7 @@ def process_uploaded_image(slot_id: int):
                 session.add(stage)
                 session.flush()
                 slot.stage_id = stage.id
-                game.status = "waiting_puzzle"
+                game.status = "waiting_next_stage"
                 existing_stage = stage
 
         # 이미지 가져오기
@@ -582,28 +883,28 @@ def process_uploaded_image(slot_id: int):
             slot.last_analyzed_at = datetime.now()
             return
 
+        # Gemini로부터 rect 받자마자 바로 이미지 보여주기
         debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         debug_draw = ImageDraw.Draw(debug_image)
         for item in detection_results:
-            pixel_box = item.get("pixel_box")
-            if not pixel_box:
-                continue
+            pixel_box = item.get("pixel_box", {})
+            x1 = pixel_box.get("xmin", 0)
+            y1 = pixel_box.get("ymin", 0)
+            x2 = pixel_box.get("xmax", 0)
+            y2 = pixel_box.get("ymax", 0)
             debug_draw.rectangle(
-                [
-                    (pixel_box["xmin"], pixel_box["ymin"]),
-                    (pixel_box["xmax"], pixel_box["ymax"]),
-                ],
+                [(x1, y1), (x2, y2)],
                 outline="red",
                 width=3,
             )
-            label = item.get("name")
+            label = item.get("name", "")
             if label:
                 debug_draw.text(
-                    (pixel_box["xmin"], max(0, pixel_box["ymin"] - 12)),
+                    (x1, max(0, y1 - 12)),
                     label,
                     fill="red",
                 )
-        debug_image.show(title=f"slot-{slot_id}-detection")
+        debug_image.show(title=f"slot-{slot_id}-gemini-detection")
 
         slot.detected_objects = []
 
@@ -641,6 +942,28 @@ def process_uploaded_image(slot_id: int):
 
         if existing_stage:
             existing_stage.total_difference_count = len(detected)
+
+        debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        debug_draw = ImageDraw.Draw(debug_image)
+        for diff in detected:
+            x1, y1 = diff.x, diff.y
+            x2 = x1 + diff.width
+            y2 = y1 + diff.height
+            debug_draw.rectangle(
+                [
+                    (x1, y1),
+                    (x2, y2),
+                ],
+                outline="red",
+                width=3,
+            )
+            if diff.label:
+                debug_draw.text(
+                    (x1, max(0, y1 - 12)),
+                    diff.label,
+                    fill="red",
+                )
+        debug_image.show(title=f"slot-{slot_id}-detection")
 
         temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         try:
