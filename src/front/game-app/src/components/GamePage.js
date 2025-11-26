@@ -220,6 +220,7 @@ function GamePage({ onNavigate, sessionId }) {
               total_stages: data.total_stages,
               current_score: data.current_score
             }));
+			setCurrentStage(data.next_stage_number);
             
             // 상태 초기화
             const nextIndex = currentImageIndex + 1;
