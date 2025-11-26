@@ -33,12 +33,12 @@ def find_game_objects_normalized(image_bytes: bytes):
     prompt = """
     You are an expert Game Level Designer for a "Spot the Difference" puzzle game.
     Your task is to analyze the image and identify 5 distinct objects to modify.
-    # **Selection Criteria:**
-    # 1. Select objects that are clearly visible and distinct from the background.
-    # 2. EXCLUDE objects that are too small, blurry, or have complex/ambiguous boundaries.
-    # 3. Focus on objects where a change (e.g., color change, removal, replacement) would be noticeable.
-    # 4. Ensure that the `box_2d` regions of the selected objects overlap as little as possible.
-    # 5. If an overlap is unavoidable, prioritize modifying the object with the larger area.
+     **Selection Criteria:**
+     1. Select objects that are clearly visible and distinct from the background.
+     2. EXCLUDE objects that are too small, blurry, or have complex/ambiguous boundaries.
+     3. Focus on objects where a change (e.g., color change, removal, replacement) would be noticeable.
+     4. Ensure that the `box_2d` regions of the selected objects overlap as little as possible.
+     5. If an overlap is unavoidable, prioritize modifying the object with the larger area.
     **Output Requirements:**
     1. Provide the output STRICTLY in valid JSON format.
     2. Do NOT use Markdown formatting.
