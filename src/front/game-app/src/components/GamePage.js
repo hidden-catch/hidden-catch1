@@ -1,3 +1,5 @@
+import React, { useState, useEffect, useRef } from 'react';
+import './GamePage.css';
 
 function GamePage({ onNavigate, sessionId }) {
   const [gameData, setGameData] = useState(null);
