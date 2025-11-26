@@ -551,6 +551,7 @@ def edit_image_with_imagen3(payload: dict):
             return
 
         stage.puzzle.modified_image_url = output_key
+        stage.puzzle.is_completed = True
         stage.status = "playing"
         game.status = "playing"
 
