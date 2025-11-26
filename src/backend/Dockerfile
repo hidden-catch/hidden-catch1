@@ -8,6 +8,8 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     gcc \
     postgresql-client \
+    libpq-dev \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # uv 설치 (Python 패키지 매니저)
