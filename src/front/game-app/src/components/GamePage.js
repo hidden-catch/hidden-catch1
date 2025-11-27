@@ -110,7 +110,7 @@ function GamePage({ onNavigate, sessionId }) {
   // 게임 데이터 로드
   const loadGameData = async (gameId) => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameId}`);
+      const response = await fetch(`/api/v1/games/${gameId}`);
       
       if (!response.ok) {
         alert('게임 데이터를 불러오지 못했습니다.');
@@ -251,8 +251,6 @@ function GamePage({ onNavigate, sessionId }) {
         body: JSON.stringify({
           x: imageX,
           y: imageY
-          x: imageX,
-          y: imageY
         }),
       });
 
@@ -277,7 +275,7 @@ function GamePage({ onNavigate, sessionId }) {
             handleAllCorrect();
           }
         } else {
-          // 오답 처리 - X표시 추가
+          // 오답 처리 - 목숨 차감 및 X표시 추가
           const newLives = lives - 1;
           setLives(newLives);
           
@@ -330,7 +328,7 @@ function GamePage({ onNavigate, sessionId }) {
     
     try {
       // 스테이지 완료 요청
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -344,7 +342,6 @@ function GamePage({ onNavigate, sessionId }) {
         const data = await response.json();
         console.log('스테이지 완료 응답:', data);
         
-        // 점수 업데이트
         // 점수 업데이트
         setUserScore(data.current_score);
         
@@ -442,7 +439,7 @@ function GamePage({ onNavigate, sessionId }) {
     
     try {
       // 게임 종료 요청
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/finish`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/finish`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
