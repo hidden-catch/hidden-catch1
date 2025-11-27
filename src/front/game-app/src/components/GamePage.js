@@ -78,9 +78,8 @@ function GamePage({ onNavigate, sessionId }) {
     }
   }, [puzzleData]);
 
-  // 게임 초기화 - 최초 1회만 실행
+  // 게임 초기화
   useEffect(() => {
-    console.log('[GamePage] useEffect 실행됨');
     const storedGameRoomId = localStorage.getItem('currentGameRoomId');
     console.log('[GamePage] storedGameRoomId:', storedGameRoomId);
     
@@ -98,25 +97,7 @@ function GamePage({ onNavigate, sessionId }) {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // 빈 배열 - 최초 마운트 시에만 실행
-
-  // 새로고침 경고
-  useEffect(() => {
-    const handleBeforeUnload = (e) => {
-      // 게임 데이터가 로드되고 게임이 진행 중일 때만 경고
-      if (gameRoomId && puzzleData && !isGameOver) {
-        e.preventDefault();
-        e.returnValue = '게임 진행 중입니다. 새로고침하면 현재 진행 상태가 초기화됩니다.';
-        return e.returnValue;
-      }
-    };
-
-    window.addEventListener('beforeunload', handleBeforeUnload);
-
-    return () => {
-      window.removeEventListener('beforeunload', handleBeforeUnload);
-    };
-  }, [gameRoomId, puzzleData, isGameOver]);
+  }, []);
 
   // 게임 데이터 로드
   const loadGameData = async (gameId) => {
@@ -131,14 +112,7 @@ function GamePage({ onNavigate, sessionId }) {
       }
 
       const data = await response.json();
-      console.log('[loadGameData] 게임 데이터 로드:', data);
-      
-      if (!data.puzzle) {
-        console.error('[loadGameData] puzzle 데이터가 없습니다:', data);
-        alert('퍼즐 데이터를 불러오지 못했습니다. 게임을 다시 시작해주세요.');
-        onNavigate('home');
-        return;
-      }
+      console.log('게임 데이터 로드:', data);
       
       setGameData(data);
       setPuzzleData(data.puzzle);
