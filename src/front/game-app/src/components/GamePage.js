@@ -80,6 +80,7 @@ function GamePage({ onNavigate, sessionId }) {
 
   // 게임 초기화
   useEffect(() => {
+    console.log('[GamePage] useEffect 실행됨');
     const storedGameRoomId = localStorage.getItem('currentGameRoomId');
     console.log('[GamePage] storedGameRoomId:', storedGameRoomId);
     
@@ -89,6 +90,7 @@ function GamePage({ onNavigate, sessionId }) {
     }
 
     return () => {
+      console.log('[GamePage] cleanup 실행됨');
       if (timerRef.current) {
         clearInterval(timerRef.current);
       }
@@ -112,7 +114,7 @@ function GamePage({ onNavigate, sessionId }) {
       }
 
       const data = await response.json();
-      console.log('게임 데이터 로드:', data);
+      console.log('[loadGameData] 게임 데이터 로드:', data);
       
       setGameData(data);
       setPuzzleData(data.puzzle);
