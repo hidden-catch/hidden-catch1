@@ -78,7 +78,7 @@ function GamePage({ onNavigate, sessionId }) {
     }
   }, [puzzleData]);
 
-  // 게임 초기화
+  // 게임 초기화 - 최초 1회만 실행
   useEffect(() => {
     console.log('[GamePage] useEffect 실행됨');
     const storedGameRoomId = localStorage.getItem('currentGameRoomId');
@@ -89,7 +89,19 @@ function GamePage({ onNavigate, sessionId }) {
       loadGameData(storedGameRoomId);
     }
 
-    // 새로고침 감지 및 경고
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+      }
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []); // 빈 배열 - 최초 마운트 시에만 실행
+
+  // 새로고침 경고
+  useEffect(() => {
     const handleBeforeUnload = (e) => {
       // 게임 데이터가 로드되고 게임이 진행 중일 때만 경고
       if (gameRoomId && puzzleData && !isGameOver) {
@@ -102,15 +114,8 @@ function GamePage({ onNavigate, sessionId }) {
     window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
-      console.log('[GamePage] cleanup 실행됨');
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-      }
-      if (pollIntervalRef.current) {
-        clearInterval(pollIntervalRef.current);
-      }
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [gameRoomId, puzzleData, isGameOver]);
 
   // 게임 데이터 로드
@@ -411,14 +416,12 @@ function GamePage({ onNavigate, sessionId }) {
 
           // status가 "playing"으로 바뀌면 다음 스테이지로 전환
           if (data.status === 'playing' && data.next_puzzle) {
-            clearInterval(pollIntervalRef.current);
-            pollIntervalRef.current = null;
+            clearInterval(pollInterval);
             console.log('다음 퍼즐 준비 완료! 전환 시작');
             moveToNextStage(data);
           } else if (data.status === 'finished' && !data.next_puzzle) {
             // 다음 퍼즐이 없으면 게임 종료
-            clearInterval(pollIntervalRef.current);
-            pollIntervalRef.current = null;
+            clearInterval(pollInterval);
             alert('모든 게임을 완료했습니다!');
             endGame();
           }
