@@ -5,7 +5,7 @@ function ImageUploadPage({ onNavigate }) {
   const [uploadedImages, setUploadedImages] = useState([]);
   const [previews, setPreviews] = useState([]);
   const [isWaitingGame, setIsWaitingGame] = useState(false); // 게임 준비 대기 상태
-  const MAX_IMAGES = 5;
+  const MAX_IMAGES = 3;
   
 
   // 이미지 파일 검증

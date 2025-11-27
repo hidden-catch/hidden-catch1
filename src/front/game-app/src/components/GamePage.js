@@ -86,13 +86,26 @@ function GamePage({ onNavigate, sessionId }) {
       loadGameData(storedGameRoomId);
     }
 
+    // 새로고침 감지 및 경고
+    const handleBeforeUnload = (e) => {
+      // 게임 진행 중일 때만 경고
+      if (gameRoomId && !isGameOver) {
+        e.preventDefault();
+        e.returnValue = '게임 진행 중입니다. 새로고침하면 현재 진행 상태가 초기화됩니다.';
+        return e.returnValue;
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
     return () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
       }
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [gameRoomId, isGameOver]);
 
   // 게임 데이터 로드
   const loadGameData = async (gameId) => {
@@ -107,10 +120,39 @@ function GamePage({ onNavigate, sessionId }) {
       const data = await response.json();
       console.log('게임 데이터 로드:', data);
       
+      // 새로고침으로 인한 재로드 감지
+      const isReload = performance.navigation.type === 1 || 
+                       performance.getEntriesByType('navigation')[0]?.type === 'reload';
+      
+      if (isReload && data.status === 'playing') {
+        // 새로고침 경고 및 게임 재시작 확인
+        const restart = window.confirm(
+          '페이지가 새로고침되었습니다.\n' +
+          '게임 진행 상태가 초기화됩니다.\n\n' +
+          '현재 스테이지를 처음부터 다시 시작하시겠습니까?\n' +
+          '(취소 시 홈으로 돌아갑니다)'
+        );
+        
+        if (!restart) {
+          localStorage.removeItem('currentGameRoomId');
+          onNavigate('home');
+          return;
+        }
+        
+        alert('게임이 재시작됩니다. 현재 스테이지를 처음부터 시작합니다.');
+      }
+      
       setGameData(data);
       setPuzzleData(data.puzzle);
       setCurrentStage(data.current_stage || 0);
       setUserScore(data.current_score || 0);
+      
+      // found_differences가 있으면 복구 (서버가 제공하는 경우)
+      if (data.found_differences && Array.isArray(data.found_differences)) {
+        setCorrectAnswers(data.found_differences);
+      } else {
+        setCorrectAnswers([]);
+      }
       
       // 스테이지 시작 시간 기록
       stageStartTimeRef.current = Date.now();
@@ -417,23 +459,45 @@ function GamePage({ onNavigate, sessionId }) {
         // 최종 점수 저장
         setFinalScore(data.final_score);
         setIsGameOver(true);
+        
+        // 게임 종료 시 localStorage 정리
+        localStorage.removeItem('currentGameRoomId');
       } else {
         console.error('게임 종료 요청 실패:', response.status);
         setIsGameOver(true);
+        localStorage.removeItem('currentGameRoomId');
       }
     } catch (error) {
       console.error('게임 종료 에러:', error);
       setIsGameOver(true);
+      localStorage.removeItem('currentGameRoomId');
     }
   };
 
   // 돌아가기
   const handleGoBack = () => {
+    // 게임 진행 중이면 확인 메시지
+    if (!isGameOver) {
+      const confirmLeave = window.confirm(
+        '게임을 중단하고 나가시겠습니까?\n' +
+        '현재 진행 상태는 저장되지 않습니다.'
+      );
+      
+      if (!confirmLeave) {
+        return; // 취소 시 아무것도 하지 않음
+      }
+    }
+    
+    // 게임 종료 처리
     clearInterval(timerRef.current);
     setCurrentImageIndex(0);
     setCorrectAnswers([]);
     setWrongAnswers([]);
     setIsGameOver(false);
+    
+    // localStorage에서 게임 ID 제거
+    localStorage.removeItem('currentGameRoomId');
+    
     onNavigate('home');
   };
 
