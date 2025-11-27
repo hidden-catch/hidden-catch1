@@ -318,8 +318,24 @@ def detect_objects_for_slot(slot_id: int):
             original_rects.append({"x": x, "y": y, "width": width, "height": height})
             original_labels.append(label)
 
+        # 전체 이미지 면적 계산
+        total_image_area = image_width * image_height
+        size_threshold = 0.4  # 40% 이상인 rect 제외
+
+        # 너무 큰 rect 제외 (전체 이미지 면적의 40% 이상)
+        size_filtered_rects: list[dict[str, float]] = []
+        size_filtered_labels: list[str] = []
+        for rect, label in zip(original_rects, original_labels):
+            rect_area = rect["width"] * rect["height"]
+            area_ratio = rect_area / total_image_area
+            if area_ratio < size_threshold:
+                size_filtered_rects.append(rect)
+                size_filtered_labels.append(label)
+
         # 트리 구조 생성 (90% 이상 겹치면 포함 관계)
-        tree = _build_rect_tree(original_rects, original_labels, overlap_threshold=0.9)
+        tree = _build_rect_tree(
+            size_filtered_rects, size_filtered_labels, overlap_threshold=0.9
+        )
 
         # 트리 구조에서 부모-자식 관계가 있는 경우 더 큰 rect(부모) 제외
         excluded_indices: set[int] = set()
@@ -340,7 +356,9 @@ def detect_objects_for_slot(slot_id: int):
         # 제외되지 않은 rect만 필터링
         filtered_rects: list[dict[str, float]] = []
         filtered_labels: list[str] = []
-        for i, (rect, label) in enumerate(zip(original_rects, original_labels)):
+        for i, (rect, label) in enumerate(
+            zip(size_filtered_rects, size_filtered_labels)
+        ):
             if i not in excluded_indices:
                 filtered_rects.append(rect)
                 filtered_labels.append(label)
