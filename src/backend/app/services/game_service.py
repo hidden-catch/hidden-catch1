@@ -32,7 +32,6 @@ from app.schemas.puzzle import (
 )
 from app.worker.tasks import (
     detect_objects_for_slot,
-    edit_image_with_imagen3,
     edit_image_with_nano_banana,
     process_uploaded_image,
     run_imagen_pipeline,
