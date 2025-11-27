@@ -33,12 +33,12 @@ def find_game_objects_normalized(image_bytes: bytes):
     prompt = """
     You are an expert Game Level Designer for a "Spot the Difference" puzzle game.
     Your task is to analyze the image and identify 5 distinct objects to modify.
-    # **Selection Criteria:**
-    # 1. Select objects that are clearly visible and distinct from the background.
-    # 2. EXCLUDE objects that are too small, blurry, or have complex/ambiguous boundaries.
-    # 3. Focus on objects where a change (e.g., color change, removal, replacement) would be noticeable.
-    # 4. Ensure that the `box_2d` regions of the selected objects overlap as little as possible.
-    # 5. If an overlap is unavoidable, prioritize modifying the object with the larger area.
+     **Selection Criteria:**
+     1. Select objects that are clearly visible and distinct from the background.
+     2. EXCLUDE objects that are too small, blurry, or have complex/ambiguous boundaries.
+     3. Focus on objects where a change (e.g., color change, removal, replacement) would be noticeable.
+     4. Ensure that the `box_2d` regions of the selected objects overlap as little as possible.
+     5. If an overlap is unavoidable, prioritize modifying the object with the larger area.
     **Output Requirements:**
     1. Provide the output STRICTLY in valid JSON format.
     2. Do NOT use Markdown formatting.
@@ -182,9 +182,8 @@ def modify_image_with_imagen(original_image_path, detection_results):
         reference_id=2,
         reference_image=types.Image(image_bytes=mask_bytes, mime_type="image/png"),
         config=types.MaskReferenceConfig(
-            # MASK_MODE_FOREGROUND: 마스크의 흰색(255) 부분을 수정함
-            mask_mode="MASK_MODE_FOREGROUND",
-            mask_dilation=0.05,  # 영역을 살짝(5%) 넓혀 경계선 어색함 방지
+            mask_mode=types.MaskReferenceMode.MASK_MODE_USER_PROVIDED,
+            mask_dilation=0,  # 영역을 살짝(5%) 넓혀 경계선 어색함 방지
         ),
     )
 
@@ -196,7 +195,7 @@ def modify_image_with_imagen(original_image_path, detection_results):
             prompt=final_prompt,
             reference_images=[raw_ref, mask_ref],
             config=types.EditImageConfig(
-                edit_mode="EDIT_MODE_INPAINT_INSERTION",
+                edit_mode=types.EditMode.EDIT_MODE_INPAINT_INSERTION,
                 number_of_images=1,
                 output_mime_type="image/png",
             ),
