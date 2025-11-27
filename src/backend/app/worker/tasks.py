@@ -445,13 +445,14 @@ def detect_objects_for_slot(slot_id: int):
             existing_stage.total_difference_count = len(detected)
             existing_stage.status = "waiting_puzzle"
 
-    return {"slot_id": slot.id, "detected": detected}
+    return {"slot_id": slot.id, "detected": detected, "image_bytes": image_bytes}
 
 
 @celery_app.task
 def edit_image_with_imagen3(payload: dict):
     slot_id = payload["slot_id"]
     detected = payload["detected"]
+    image_bytes = payload["image_bytes"]
     with get_session() as session:
         slot = session.get(GameUploadSlot, slot_id)
         if slot is None or not slot.s3_object_key:
@@ -464,16 +465,6 @@ def edit_image_with_imagen3(payload: dict):
             aws_secret_access_key=settings.aws_secret_access_key,
             region_name=settings.aws_region,
         )
-        try:
-            response = s3_client.get_object(
-                Bucket=settings.aws_s3_bucket_name, Key=s3_object_key
-            )
-            image_bytes = response["Body"].read()
-        except Exception as exc:
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"S3 download failed: {exc}"
-            slot.last_analyzed_at = datetime.now()
-            return
 
         try:
             with Image.open(io.BytesIO(image_bytes)) as img:
