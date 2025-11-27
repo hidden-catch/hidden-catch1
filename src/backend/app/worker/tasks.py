@@ -507,6 +507,10 @@ def edit_image_with_nano_banana(payload: dict):
             slot.last_analyzed_at = datetime.now()
             return
 
+        # GCP 서비스 계정 키 설정
+        if settings.google_application_credentials:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = settings.google_application_credentials
+        
         prompt = _build_prompt(detected)
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
         client = genai.Client(
