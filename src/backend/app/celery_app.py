@@ -15,5 +15,5 @@ celery_app.conf.update(
     enable_utc=True,
 )
 
-# Auto-discover tasks from app.tasks module
-celery_app.autodiscover_tasks(["app.tasks"])
+# Auto-discover tasks from app.worker.tasks module
+celery_app.autodiscover_tasks(["app.worker"])
