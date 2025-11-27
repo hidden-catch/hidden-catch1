@@ -6,9 +6,7 @@ import time
 
 import boto3
 from celery import chain
-from google import genai
 from google.cloud import vision
-from google.genai import types
 from PIL import Image, ImageDraw
 from sqlalchemy import delete, select
 
@@ -18,11 +16,203 @@ from app.models.game import Game, GameStage
 from app.models.puzzle import Difference, Puzzle
 from app.models.upload_slot import GameUploadSlot
 from app.worker.celery_app import celery_app
-from app.worker.detect import (
-    find_game_objects_normalized,
-    modify_image_with_imagen,
-    modify_image_with_imagen2,
-)
+from app.worker.detect import modify_image_with_imagen
+
+
+def _calculate_overlap_ratio(
+    child_box: dict[str, float], parent_box: dict[str, float]
+) -> float:
+    """
+    child_box가 parent_box에 얼마나 포함되어 있는지 비율을 계산합니다.
+
+    Args:
+        child_box: 자식 박스 {'x': float, 'y': float, 'width': float, 'height': float}
+        parent_box: 부모 박스 {'x': float, 'y': float, 'width': float, 'height': float}
+
+    Returns:
+        child_box 면적 대비 겹침 비율 (0.0 ~ 1.0)
+    """
+    x1, y1 = child_box["x"], child_box["y"]
+    x2 = x1 + child_box["width"]
+    y2 = y1 + child_box["height"]
+
+    px1, py1 = parent_box["x"], parent_box["y"]
+    px2 = px1 + parent_box["width"]
+    py2 = py1 + parent_box["height"]
+
+    # 교집합 영역 계산
+    inter_x1 = max(x1, px1)
+    inter_y1 = max(y1, py1)
+    inter_x2 = min(x2, px2)
+    inter_y2 = min(y2, py2)
+
+    if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
+        return 0.0
+
+    inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+    child_area = child_box["width"] * child_box["height"]
+
+    if child_area == 0:
+        return 0.0
+
+    return inter_area / child_area
+
+
+def _build_rect_tree(
+    rects: list[dict[str, float]], labels: list[str], overlap_threshold: float = 0.9
+) -> list[dict]:
+    """
+    rect들 간의 포함 관계를 기반으로 트리 구조를 생성합니다.
+    90% 이상 겹치면 포함 관계로 간주합니다.
+
+    Args:
+        rects: rect 리스트 [{'x': float, 'y': float, 'width': float, 'height': float}, ...]
+        labels: 각 rect의 라벨 리스트
+        overlap_threshold: 포함 관계로 간주할 겹침 비율 (기본값: 0.9 = 90%)
+
+    Returns:
+        트리 구조 리스트 [{'rect': dict, 'label': str, 'children': list, 'index': int}, ...]
+        루트 노드들만 반환되며, 각 노드는 children 리스트를 가집니다.
+    """
+    # 면적 계산 및 인덱스와 함께 저장
+    rect_data: list[tuple[dict[str, float], str, float, int]] = []
+    for i, (rect, label) in enumerate(zip(rects, labels)):
+        area = rect["width"] * rect["height"]
+        rect_data.append((rect, label, area, i))
+
+    # 면적 내림차순으로 정렬 (큰 것부터)
+    rect_data.sort(key=lambda x: x[2], reverse=True)
+
+    # 트리 노드 생성
+    nodes: list[dict] = []
+    node_map: dict[int, dict] = {}  # index -> node
+
+    for rect, label, area, original_index in rect_data:
+        node = {
+            "rect": rect,
+            "label": label,
+            "index": original_index,
+            "children": [],
+            "parent": None,
+        }
+        nodes.append(node)
+        node_map[original_index] = node
+
+    # 각 rect에 대해 부모 찾기
+    for i, (rect, label, area, original_index) in enumerate(rect_data):
+        current_node = node_map[original_index]
+
+        # 자신보다 큰 rect들 중에서 90% 이상 포함되는 가장 작은 rect 찾기
+        best_parent = None
+        best_parent_area = float("inf")
+
+        for j in range(i):  # 자신보다 큰 rect들만 확인
+            parent_rect, parent_label, parent_area, parent_index = rect_data[j]
+            parent_node = node_map[parent_index]
+
+            # 이미 부모가 있으면 건너뛰기
+            if parent_node["parent"] is not None:
+                continue
+
+            overlap_ratio = _calculate_overlap_ratio(rect, parent_rect)
+            if overlap_ratio >= overlap_threshold:
+                # 더 작은 부모를 선택 (더 가까운 부모)
+                if parent_area < best_parent_area:
+                    best_parent = parent_node
+                    best_parent_area = parent_area
+
+        if best_parent:
+            best_parent["children"].append(current_node)
+            current_node["parent"] = best_parent
+
+    # 루트 노드들만 반환 (부모가 없는 노드들)
+    root_nodes = [node for node in nodes if node["parent"] is None]
+    return root_nodes
+
+
+def _shrink_box_centered(
+    box: dict[str, float], shrink_ratio: float = 0.1
+) -> dict[str, float]:
+    """
+    박스를 중앙을 고정한 상태에서 크기를 축소합니다.
+
+    Args:
+        box: 축소할 박스 {'x': float, 'y': float, 'width': float, 'height': float}
+        shrink_ratio: 축소 비율 (기본값: 0.1 = 10%)
+
+    Returns:
+        축소된 박스 (중앙 고정)
+    """
+    center_x = box["x"] + box["width"] / 2
+    center_y = box["y"] + box["height"] / 2
+
+    new_width = box["width"] * (1 - shrink_ratio)
+    new_height = box["height"] * (1 - shrink_ratio)
+
+    return {
+        "x": center_x - new_width / 2,
+        "y": center_y - new_height / 2,
+        "width": new_width,
+        "height": new_height,
+    }
+
+
+def _process_rects_with_iou(
+    rects: list[dict[str, float]], labels: list[str]
+) -> tuple[list[dict[str, float] | None], list[str]]:
+    """
+    모든 rect에 대해 IoU를 계산하고 처리합니다.
+
+    Args:
+        rects: rect 리스트 [{'x': float, 'y': float, 'width': float, 'height': float}, ...]
+        labels: 각 rect의 라벨 리스트
+
+    Returns:
+        처리된 rect 리스트 (삭제된 것은 None)와 라벨 리스트
+    """
+    processed_rects: list[dict[str, float] | None] = [rect.copy() for rect in rects]
+    processed_labels = labels.copy()
+
+    # 각 rect에 대해 다른 모든 rect와의 겹침 비율 계산 (해당 rect 면적 대비)
+    for i, current_rect in enumerate(processed_rects):
+        if current_rect is None:
+            continue
+
+        current_area = current_rect["width"] * current_rect["height"]
+        max_overlap_ratio = 0.0
+
+        for j, other_rect in enumerate(processed_rects):
+            if i == j or other_rect is None:
+                continue
+
+            # 교집합 영역 계산
+            x1_1, y1_1 = current_rect["x"], current_rect["y"]
+            x2_1 = x1_1 + current_rect["width"]
+            y2_1 = y1_1 + current_rect["height"]
+
+            x1_2, y1_2 = other_rect["x"], other_rect["y"]
+            x2_2 = x1_2 + other_rect["width"]
+            y2_2 = y1_2 + other_rect["height"]
+
+            inter_x1 = max(x1_1, x1_2)
+            inter_y1 = max(y1_1, y1_2)
+            inter_x2 = min(x2_1, x2_2)
+            inter_y2 = min(y2_1, y2_2)
+
+            if inter_x2 > inter_x1 and inter_y2 > inter_y1:
+                inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
+                # 현재 rect 면적 대비 겹침 비율
+                overlap_ratio = inter_area / current_area if current_area > 0 else 0.0
+                max_overlap_ratio = max(max_overlap_ratio, overlap_ratio)
+
+        # 겹침 비율에 따라 처리 (해당 rect 면적 대비)
+        if max_overlap_ratio >= 0.5:  # 겹침 >= 50% → 삭제
+            processed_rects[i] = None
+        elif max_overlap_ratio >= 0.1:  # 10% <= 겹침 < 50% → 중앙 고정하고 10% 축소
+            processed_rects[i] = _shrink_box_centered(current_rect, shrink_ratio=0.1)
+        # 겹침 < 10% → 그대로 유지
+
+    return processed_rects, processed_labels
 
 
 @celery_app.task
@@ -109,15 +299,12 @@ def detect_objects_for_slot(slot_id: int):
                 session.add(existing_stage)
                 session.flush()
                 slot.stage_id = existing_stage.id
-                game.status = "waiting_puzzle"
+                game.status = "waiting_next_stage"
 
-        detected = []
-        index = 0
-
-        stmt = delete(Difference).where(Difference.puzzle_id == puzzle.id)
-        session.execute(stmt)
+        # 먼저 모든 원본 rect 수집
+        original_rects: list[dict[str, float]] = []
+        original_labels: list[str] = []
         for object_ in objects:
-            index += 1
             label = object_.name
             vertices = object_.bounding_poly.normalized_vertices
 
@@ -128,11 +315,83 @@ def detect_objects_for_slot(slot_id: int):
             width = (v_max.x - v_min.x) * image_width
             height = (v_max.y - v_min.y) * image_height
 
+            original_rects.append({"x": x, "y": y, "width": width, "height": height})
+            original_labels.append(label)
+
+        # 전체 이미지 면적 계산
+        total_image_area = image_width * image_height
+        size_threshold = 0.4  # 40% 이상인 rect 제외
+
+        # 너무 큰 rect 제외 (전체 이미지 면적의 40% 이상)
+        size_filtered_rects: list[dict[str, float]] = []
+        size_filtered_labels: list[str] = []
+        for rect, label in zip(original_rects, original_labels):
+            rect_area = rect["width"] * rect["height"]
+            area_ratio = rect_area / total_image_area
+            if area_ratio < size_threshold:
+                size_filtered_rects.append(rect)
+                size_filtered_labels.append(label)
+
+        # 트리 구조 생성 (90% 이상 겹치면 포함 관계)
+        tree = _build_rect_tree(
+            size_filtered_rects, size_filtered_labels, overlap_threshold=0.9
+        )
+
+        # 트리 구조에서 부모-자식 관계가 있는 경우 더 큰 rect(부모) 제외
+        excluded_indices: set[int] = set()
+
+        def mark_parents_for_exclusion(node: dict) -> None:
+            """부모-자식 관계에서 부모(더 큰 rect)를 제외 목록에 추가"""
+            if node["children"]:
+                # 자식이 있으면 부모(자신) 제외
+                excluded_indices.add(node["index"])
+                # 자식들도 재귀적으로 확인
+                for child in node["children"]:
+                    mark_parents_for_exclusion(child)
+
+        # 모든 루트 노드에서 시작하여 부모 제외
+        for root_node in tree:
+            mark_parents_for_exclusion(root_node)
+
+        # 제외되지 않은 rect만 필터링
+        filtered_rects: list[dict[str, float]] = []
+        filtered_labels: list[str] = []
+        for i, (rect, label) in enumerate(
+            zip(size_filtered_rects, size_filtered_labels)
+        ):
+            if i not in excluded_indices:
+                filtered_rects.append(rect)
+                filtered_labels.append(label)
+
+        # IoU에 따라 처리 (50% 이상 삭제, 10-50% 축소, 10% 미만 유지)
+        processed_rects, processed_labels = _process_rects_with_iou(
+            filtered_rects, filtered_labels
+        )
+
+        # 처리된 rect로 Difference 생성
+        detected: list[dict] = []
+        stored_differences: list[Difference] = []
+        index = 0
+
+        stmt = delete(Difference).where(Difference.puzzle_id == puzzle.id)
+        session.execute(stmt)
+        for processed_rect, label in zip(processed_rects, processed_labels):
+            # 삭제된 rect는 건너뛰기
+            if processed_rect is None:
+                continue
+
+            index += 1
+            x = processed_rect["x"]
+            y = processed_rect["y"]
+            width = processed_rect["width"]
+            height = processed_rect["height"]
+
+            # normalized rect 계산 (0-1000 스케일)
             normalized_rect = [
-                int(v_min.y * 1000),
-                int(v_min.x * 1000),
-                int(v_max.y * 1000),
-                int(v_max.x * 1000),
+                int((y / image_height) * 1000),
+                int((x / image_width) * 1000),
+                int(((y + height) / image_height) * 1000),
+                int(((x + width) / image_width) * 1000),
             ]
 
             detected.append(
@@ -143,20 +402,25 @@ def detect_objects_for_slot(slot_id: int):
             )
 
             difference = Difference(
-                puzzle_id=puzzle.id, index=index, x=x, y=y, width=width, height=height
+                puzzle_id=puzzle.id,
+                index=index,
+                x=x,
+                y=y,
+                width=width,
+                height=height,
+                label=label,
             )
 
             session.add(difference)
             session.flush()
+            stored_differences.append(difference)
 
         debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         draw = ImageDraw.Draw(debug_image)
-        for rect in detected:
-            ymin, xmin, ymax, xmax = rect["rect"]
-            x1 = int(xmin / 1000 * image_width)
-            y1 = int(ymin / 1000 * image_height)
-            x2 = int(xmax / 1000 * image_width)
-            y2 = int(ymax / 1000 * image_height)
+        for diff in stored_differences:
+            x1, y1 = diff.x, diff.y
+            x2 = x1 + diff.width
+            y2 = y1 + diff.height
             draw.rectangle(
                 [
                     (x1, y1),
@@ -165,6 +429,12 @@ def detect_objects_for_slot(slot_id: int):
                 outline="red",
                 width=3,
             )
+            if diff.label:
+                draw.text(
+                    (x1, max(0, y1 - 12)),
+                    diff.label,
+                    fill="red",
+                )
         debug_image.show(title=f"slot-{slot_id}-detections")
 
         slot.detected_objects = detected
@@ -179,127 +449,7 @@ def detect_objects_for_slot(slot_id: int):
 
 
 @celery_app.task
-def edit_image_with_nano_banana(payload: dict):
-    slot_id = payload["slot_id"]
-    detected = payload["detected"]
-    with get_session() as session:
-        slot = session.get(GameUploadSlot, slot_id)
-        if slot is None or not slot.s3_object_key:
-            return
-
-        s3_object_key = slot.s3_object_key
-
-        s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=settings.aws_region,
-        )
-        try:
-            s3_response = s3_client.get_object(
-                Bucket=settings.aws_s3_bucket_name, Key=s3_object_key
-            )
-            image_bytes = s3_response["Body"].read()
-        except Exception as e:
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"S3 download failed: {e}"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        prompt = _build_prompt(detected)
-        image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
-        client = genai.Client(
-            vertexai=True,
-            project=settings.gcp_project_id,
-            location="us-central1",
-        )
-
-        try:
-            response = client.models.generate_content(
-                model="gemini-2.5-flash-image",
-                contents=[prompt, image_part],
-                config=types.GenerateContentConfig(
-                    response_modalities=["IMAGE"],
-                ),
-            )
-        except Exception as e:
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"Gemini call failed: {e}"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        candidates = getattr(response, "candidates", None)
-        if not candidates:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Gemini returned nothing."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        content = getattr(candidates[0], "content", None)
-        if not content or not getattr(content, "parts", None):
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Gemini returned nothing."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        game = session.get(Game, slot.game_id)
-        if game is None:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Game not found."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        stage = session.get(GameStage, slot.stage_id) if slot.stage_id else None
-        if stage is None:
-            stage = GameStage(
-                game_id=game.id,
-                stage_number=slot.slot_number,
-                status="waiting_puzzle",
-                started_at=datetime.now(),
-            )
-            session.add(stage)
-            session.flush()
-            slot.stage_id = stage.id
-        if not stage or not stage.puzzle:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Puzzle not found"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        processed = False
-
-        for part in content.parts:
-            inline = getattr(part, "inline_data", None)
-            if not inline:
-                continue
-
-            image_bytes = inline.data
-            if image_bytes is None:
-                slot.analysis_status = "failed"
-                slot.analysis_error = "Gemini returned nothing."
-                slot.last_analyzed_at = datetime.now()
-                return
-
-            output_key = s3_object_key.replace(".png", "-modified.png")
-
-            s3_client.put_object(
-                Bucket=settings.aws_s3_bucket_name,
-                Key=output_key,
-                Body=image_bytes,
-                ContentType="image/png",
-            )
-
-            stage.puzzle.modified_image_url = output_key
-            stage.status = "playing"
-            game.status = "playing"
-
-            slot.analysis_status = "completed"
-            slot.analysis_error = None
-            slot.last_analyzed_at = datetime.now()
-
-
-@celery_app.task
-def edit_image_with_imagen(payload: dict):
+def edit_image_with_imagen3(payload: dict):
     slot_id = payload["slot_id"]
     detected = payload["detected"]
     with get_session() as session:
@@ -419,6 +569,7 @@ def edit_image_with_imagen(payload: dict):
             return
 
         stage.puzzle.modified_image_url = output_key
+        stage.puzzle.is_completed = True
         stage.status = "playing"
         game.status = "playing"
 
@@ -431,259 +582,5 @@ def edit_image_with_imagen(payload: dict):
 def run_imagen_pipeline(slot_id: int) -> None:
     chain(
         detect_objects_for_slot.s(slot_id),
-        edit_image_with_imagen.s(),
+        edit_image_with_imagen3.s(),
     ).delay()
-
-
-def _build_prompt(detected_objects: list) -> str:
-    import random
-
-    # 1. 틀린그림찾기용 액션 리스트 (랜덤 선택용)
-    actions = [
-        "Change the color of the object to a different hue.",  # 색상 변경
-        "Replace the object with a similar but distinct item.",  # 비슷한 물건으로 교체
-        "Remove the object completely and fill with background (inpainting).",  # 삭제
-        "Change the texture or pattern of the object.",  # 패턴 변경
-        "Flip or rotate the object slightly.",  # 회전/반전
-    ]
-
-    # 2. 프롬프트 헤더 작성
-    prompt_lines = [
-        "Create a 'Spot the Difference' puzzle image based on the input image.",
-        "Apply visual modifications ONLY to the specific regions defined by the bounding boxes below.",
-        "The coordinates are provided in [ymin, xmin, ymax, xmax] format on a 0-1000 scale.",
-        "",  # 가독성을 위한 빈 줄
-    ]
-
-    # 3. 각 영역별 지시사항 생성
-    for idx, item in enumerate(detected_objects, 1):
-        rect = item["rect"]
-        action = random.choice(actions)
-
-        prompt_lines.append(f"{idx}. Region {rect}: {action}")
-
-    # 4. 프롬프트 푸터
-    prompt_lines.extend(
-        [
-            "",
-            "Constraints:",
-            "- Ensure all edits blend seamlessly with the original image's lighting, shadows, and style.",
-            "- Do NOT modify any part of the image outside the specified bounding boxes.",
-            "- Keep the image realistic and high quality.",
-        ]
-    )
-
-    # 5. 하나의 문자열로 합쳐서 반환
-    return "\n".join(prompt_lines)
-
-
-@celery_app.task
-def process_uploaded_image(slot_id: int):
-    with get_session() as session:
-        slot = session.get(GameUploadSlot, slot_id)
-        if slot is None:
-            return
-        if slot.s3_object_key is None:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Upload slot has no image."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        slot.analysis_status = "processing"
-        slot.analysis_error = None
-        slot.last_analyzed_at = datetime.now()
-
-        game = session.get(Game, slot.game_id)
-        if game is None:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Game not found."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        existing_stage = (
-            session.get(GameStage, slot.stage_id) if slot.stage_id else None
-        )
-        puzzle = (
-            existing_stage.puzzle if existing_stage and existing_stage.puzzle else None
-        )
-
-        if puzzle is None:
-            puzzle = Puzzle(
-                difficulty=game.difficulty,
-                original_image_url=slot.s3_object_key,
-                modified_image_url=slot.s3_object_key,
-                width=0,
-                height=0,
-            )
-            session.add(puzzle)
-            session.flush()
-
-            if existing_stage is not None:
-                existing_stage.puzzle_id = puzzle.id
-            else:
-                stage = GameStage(
-                    game_id=game.id,
-                    puzzle_id=puzzle.id,
-                    stage_number=slot.slot_number,
-                    status="waiting_puzzle",
-                    started_at=datetime.now(),
-                )
-                session.add(stage)
-                session.flush()
-                slot.stage_id = stage.id
-                game.status = "waiting_puzzle"
-                existing_stage = stage
-
-        # 이미지 가져오기
-        s3_client = boto3.client(
-            "s3",
-            aws_access_key_id=settings.aws_access_key_id,
-            aws_secret_access_key=settings.aws_secret_access_key,
-            region_name=settings.aws_region,
-        )
-
-        try:
-            s3_response = s3_client.get_object(
-                Bucket=settings.aws_s3_bucket_name, Key=slot.s3_object_key
-            )
-            image_bytes = s3_response["Body"].read()
-        except Exception as exc:
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"S3 download failed: {exc}"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        try:
-            with Image.open(io.BytesIO(image_bytes)) as img:
-                img_width, img_height = img.size
-        except Exception as exc:
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"Invalid image: {exc}"
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        puzzle.width = img_width
-        puzzle.height = img_height
-
-        detected = []
-        index = 0
-
-        stmt = delete(Difference).where(Difference.puzzle_id == puzzle.id)
-        session.execute(stmt)
-        try:
-            detection_results = find_game_objects_normalized(image_bytes)
-        except Exception as exc:
-            detection_results = None
-            slot.analysis_error = f"Gemini detection failed: {exc}"
-        if not detection_results:
-            slot.analysis_status = "failed"
-            if slot.analysis_error is None:
-                slot.analysis_error = "Gemini detection returned no objects."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        debug_draw = ImageDraw.Draw(debug_image)
-        for item in detection_results:
-            pixel_box = item.get("pixel_box")
-            if not pixel_box:
-                continue
-            debug_draw.rectangle(
-                [
-                    (pixel_box["xmin"], pixel_box["ymin"]),
-                    (pixel_box["xmax"], pixel_box["ymax"]),
-                ],
-                outline="red",
-                width=3,
-            )
-            label = item.get("name")
-            if label:
-                debug_draw.text(
-                    (pixel_box["xmin"], max(0, pixel_box["ymin"] - 12)),
-                    label,
-                    fill="red",
-                )
-        debug_image.show(title=f"slot-{slot_id}-detection")
-
-        slot.detected_objects = []
-
-        for item in detection_results:
-            index += 1
-            pixel_box = item["pixel_box"]
-
-            x = pixel_box["xmin"]
-            y = pixel_box["ymin"]
-            width = pixel_box["xmax"] - pixel_box["xmin"]
-            height = pixel_box["ymax"] - pixel_box["ymin"]
-
-            difference = Difference(
-                puzzle_id=puzzle.id,
-                index=index,
-                x=x,
-                y=y,
-                width=width,
-                height=height,
-                label=item.get("name"),
-            )
-            session.add(difference)
-            detected.append(difference)
-
-            normalized_rect = [
-                int(coord * 1000) for coord in item.get("normalized", [])
-            ]
-            slot.detected_objects.append(
-                {
-                    "label": item.get("name"),
-                    "rect": normalized_rect,
-                    "prompt": item.get("prompt"),
-                }
-            )
-
-        if existing_stage:
-            existing_stage.total_difference_count = len(detected)
-
-        temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        try:
-            temp_file.write(image_bytes)
-            temp_file.flush()
-            temp_file_path = temp_file.name
-        finally:
-            temp_file.close()
-
-        try:
-            imagen_output = modify_image_with_imagen2(temp_file_path, detection_results)
-        except Exception as exc:
-            os.unlink(temp_file_path)
-            slot.analysis_status = "failed"
-            slot.analysis_error = f"Imagen edit failed: {exc}"
-            slot.last_analyzed_at = datetime.now()
-            return
-        finally:
-            if os.path.exists(temp_file_path):
-                os.unlink(temp_file_path)
-
-        if isinstance(imagen_output, (bytes, bytearray)):
-            output_key = slot.s3_object_key.replace(".png", "-modified.png")
-            s3_client.put_object(
-                Bucket=settings.aws_s3_bucket_name,
-                Key=output_key,
-                Body=imagen_output,
-                ContentType="image/png",
-            )
-        elif isinstance(imagen_output, str):
-            output_key = imagen_output
-        else:
-            slot.analysis_status = "failed"
-            slot.analysis_error = "Imagen returned no data."
-            slot.last_analyzed_at = datetime.now()
-            return
-
-        puzzle.modified_image_url = output_key
-        slot.analysis_status = "completed"
-        slot.analysis_error = None
-        slot.last_analyzed_at = datetime.now()
-
-        if existing_stage:
-            existing_stage.status = "playing"
-            existing_stage.started_at = existing_stage.started_at or datetime.now()
-        game.status = "playing"

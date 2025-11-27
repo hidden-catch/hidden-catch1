@@ -2,6 +2,7 @@ from datetime import datetime, timedelta
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 from celery import chain
 from fastapi import Depends, HTTPException
 from sqlalchemy.orm import Session, selectinload
@@ -29,7 +30,7 @@ from app.schemas.puzzle import (
     HitAttempt,
     PuzzleForGameResponse,
 )
-from app.worker.tasks import detect_objects_for_slot, edit_image_with_nano_banana
+from app.worker.tasks import run_imagen_pipeline
 
 
 def _build_s3_client() -> Any:
@@ -66,10 +67,31 @@ class GameService:
             Params={
                 "Bucket": settings.aws_s3_bucket_name,
                 "Key": object_key,
-                "ContentType": "image/png",
             },
             ExpiresIn=ttl,
         )
+
+    def _validate_upload_content_type(self, object_key: str) -> str:
+        if not settings.aws_s3_bucket_name:
+            raise HTTPException(status_code=500, detail="S3 bucket is not configured")
+        try:
+            metadata = self.s3_client.head_object(
+                Bucket=settings.aws_s3_bucket_name,
+                Key=object_key,
+            )
+        except ClientError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail="Uploaded object not found in storage.",
+            ) from exc
+        content_type = metadata.get("ContentType") or ""
+        allowed = settings.allowed_upload_content_types or []
+        if allowed and content_type not in allowed:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Unsupported content type: {content_type}",
+            )
+        return content_type
 
     def create_game(self, payload: CreateGameRequest) -> CreateGameResponse:
         game = Game(
@@ -117,6 +139,9 @@ class GameService:
                     slot=slot_number,
                     presigned_url=presigned_url,
                     expires_at=expires_at,
+                    accepted_content_types=list(
+                        settings.allowed_upload_content_types or []
+                    ),
                 )
             )
         self.session.commit()
@@ -151,11 +176,9 @@ class GameService:
         slot.analysis_error = None
         slot.detected_objects = None
         slot.last_analyzed_at = None
+        self._validate_upload_content_type(slot.s3_object_key)
         self.session.commit()
-        chain(
-            detect_objects_for_slot.s(slot.id),
-            edit_image_with_nano_banana.s(),
-        ).delay()
+        run_imagen_pipeline.delay(slot.id)
 
         slots = (
             self.session.query(GameUploadSlot)
@@ -243,7 +266,14 @@ class GameService:
             game.stages[-1] if game.stages else None,
         )
         current_stage_number = current_stage.stage_number if current_stage else 0
-        puzzle = current_stage.puzzle if current_stage else None
+        puzzle = (
+            current_stage.puzzle
+            if current_stage
+            and current_stage.status == "playing"
+            and current_stage.puzzle
+            and current_stage.puzzle.is_completed
+            else None
+        )
         puzzle_schema = (
             PuzzleForGameResponse(
                 puzzle_id=puzzle.id,
@@ -292,6 +322,7 @@ class GameService:
             raise HTTPException(status_code=400, detail="Puzzle not ready")
 
         attempt = HitAttempt(x=payload.x, y=payload.y)
+        print(attempt)
         matched = self._match_difference(stage.puzzle.differences, payload.x, payload.y)
         total_diffs = stage.total_difference_count or len(stage.puzzle.differences)
 
@@ -357,6 +388,9 @@ class GameService:
         if stage.total_difference_count is None and stage.puzzle is not None:
             stage.total_difference_count = len(stage.puzzle.differences)
 
+        total_stages = len(stage.game.stages)
+        is_last_stage = stage_number >= total_stages
+
         next_stage = (
             self.session.query(GameStage)
             .options(selectinload(GameStage.puzzle))
@@ -366,9 +400,21 @@ class GameService:
             )
             .one_or_none()
         )
+        if next_stage and next_stage.status == "finished":
+            raise HTTPException(status_code=404, detail="Stage not found")
         next_puzzle_schema = None
         next_stage_number = next_stage.stage_number if next_stage else None
-        if next_stage and next_stage.puzzle:
+
+        if is_last_stage:
+            # 마지막 stage를 완료한 경우
+            stage.game.status = "finished"
+        elif (
+            next_stage
+            and next_stage.puzzle
+            and next_stage.status == "playing"
+            and next_stage.puzzle.is_completed
+        ):
+            # 다음 puzzle이 완료된 경우
             next_puzzle_schema = PuzzleForGameResponse(
                 puzzle_id=next_stage.puzzle.id,
                 original_image_url=self._build_view_url(
@@ -381,14 +427,20 @@ class GameService:
                 height=next_stage.puzzle.height,
                 total_difference_count=len(next_stage.puzzle.differences),
             )
-            next_stage.status = "playing"
+            stage.game.status = "playing"
+        elif next_stage:
+            # 다음 stage가 있지만 puzzle이 아직 완료되지 않은 경우
+            stage.game.status = "waiting_next_stage"
+        else:
+            # 다음 stage가 없는 경우 (데이터 불일치)
+            stage.game.status = "finished"
 
         self.session.commit()
 
         return StageResultResponse(
             game_id=game_id,
             stage_number=stage_number,
-            total_stages=len(stage.game.stages),
+            total_stages=total_stages,
             status=stage.game.status,
             current_score=stage.game.current_score,
             found_difference_count=stage.found_difference_count,
