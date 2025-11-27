@@ -7,7 +7,7 @@ import time
 import boto3
 from celery import chain
 from google.cloud import vision
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 from sqlalchemy import delete, select
 
 from app.core.config import settings
@@ -278,11 +278,18 @@ def detect_objects_for_slot(slot_id: int):
                 ContentType="image/png",
             )
 
+        # EXIF orientation으로 사진 방향 고정
         with Image.open(io.BytesIO(image_bytes)) as img:
-            image_width, image_height = img.size
+            img_with_exif = ImageOps.exif_transpose(img)
+            img_with_exif = img_with_exif.convert("RGB")
+            image_width, image_height = img_with_exif.size
+
+            normalized_output = io.BytesIO()
+            img_with_exif.save(normalized_output, format="PNG")
+            normalized_image_bytes = normalized_output.getvalue()
 
         client = vision.ImageAnnotatorClient()
-        image = vision.Image(content=image_bytes)
+        image = vision.Image(content=normalized_image_bytes)
 
         objects = client.object_localization(image=image).localized_object_annotations  # type: ignore
         if not objects:
@@ -445,27 +452,25 @@ def detect_objects_for_slot(slot_id: int):
             session.flush()
             stored_differences.append(difference)
 
-        debug_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-        draw = ImageDraw.Draw(debug_image)
-        for diff in stored_differences:
-            x1, y1 = diff.x, diff.y
-            x2 = x1 + diff.width
-            y2 = y1 + diff.height
-            draw.rectangle(
-                [
-                    (x1, y1),
-                    (x2, y2),
-                ],
-                outline="red",
-                width=3,
-            )
-            if diff.label:
-                draw.text(
-                    (x1, max(0, y1 - 12)),
-                    diff.label,
-                    fill="red",
+        if settings.debug:
+            debug_image = Image.open(io.BytesIO(normalized_image_bytes)).convert("RGB")
+            draw = ImageDraw.Draw(debug_image)
+            for diff in stored_differences:
+                x1, y1 = diff.x, diff.y
+                x2 = x1 + diff.width
+                y2 = y1 + diff.height
+                draw.rectangle(
+                    [(x1, y1), (x2, y2)],
+                    outline="red",
+                    width=3,
                 )
-        debug_image.show(title=f"slot-{slot_id}-detections")
+                if diff.label:
+                    draw.text(
+                        (x1, max(0, y1 - 12)),
+                        diff.label,
+                        fill="red",
+                    )
+            debug_image.show(title=f"slot-{slot_id}-detections")
 
         slot.detected_objects = detected
         slot.analysis_status = "completed"
@@ -475,7 +480,11 @@ def detect_objects_for_slot(slot_id: int):
             existing_stage.total_difference_count = len(detected)
             existing_stage.status = "waiting_puzzle"
 
-    return {"slot_id": slot.id, "detected": detected, "image_bytes": image_bytes}
+    return {
+        "slot_id": slot.id,
+        "detected": detected,
+        "image_bytes": normalized_image_bytes,
+    }
 
 
 @celery_app.task
