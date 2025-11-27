@@ -86,18 +86,31 @@ function GamePage({ onNavigate, sessionId }) {
       loadGameData(storedGameRoomId);
     }
 
+    // 새로고침 감지 및 경고
+    const handleBeforeUnload = (e) => {
+      // 게임 진행 중일 때만 경고
+      if (gameRoomId && !isGameOver) {
+        e.preventDefault();
+        e.returnValue = '게임 진행 중입니다. 새로고침하면 현재 진행 상태가 초기화됩니다.';
+        return e.returnValue;
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
     return () => {
       if (timerRef.current) {
         clearInterval(timerRef.current);
       }
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [gameRoomId, isGameOver]);
 
   // 게임 데이터 로드
   const loadGameData = async (gameId) => {
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameId}`);
+      const response = await fetch(`/api/v1/games/${gameId}`);
       
       if (!response.ok) {
         alert('게임 데이터를 불러오지 못했습니다.');
@@ -107,10 +120,39 @@ function GamePage({ onNavigate, sessionId }) {
       const data = await response.json();
       console.log('게임 데이터 로드:', data);
       
+      // 새로고침으로 인한 재로드 감지
+      const isReload = performance.navigation.type === 1 || 
+                       performance.getEntriesByType('navigation')[0]?.type === 'reload';
+      
+      if (isReload && data.status === 'playing') {
+        // 새로고침 경고 및 게임 재시작 확인
+        const restart = window.confirm(
+          '페이지가 새로고침되었습니다.\n' +
+          '게임 진행 상태가 초기화됩니다.\n\n' +
+          '현재 스테이지를 처음부터 다시 시작하시겠습니까?\n' +
+          '(취소 시 홈으로 돌아갑니다)'
+        );
+        
+        if (!restart) {
+          localStorage.removeItem('currentGameRoomId');
+          onNavigate('home');
+          return;
+        }
+        
+        alert('게임이 재시작됩니다. 현재 스테이지를 처음부터 시작합니다.');
+      }
+      
       setGameData(data);
       setPuzzleData(data.puzzle);
       setCurrentStage(data.current_stage || 0);
       setUserScore(data.current_score || 0);
+      
+      // found_differences가 있으면 복구 (서버가 제공하는 경우)
+      if (data.found_differences && Array.isArray(data.found_differences)) {
+        setCorrectAnswers(data.found_differences);
+      } else {
+        setCorrectAnswers([]);
+      }
       
       // 스테이지 시작 시간 기록
       stageStartTimeRef.current = Date.now();
@@ -201,7 +243,7 @@ function GamePage({ onNavigate, sessionId }) {
 
     // 서버로 클릭 좌표 전송
     try {
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
+      const response = await fetch(`api/v1/games/${gameRoomId}/stages/${currentStage}/check`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -233,7 +275,7 @@ function GamePage({ onNavigate, sessionId }) {
             handleAllCorrect();
           }
         } else {
-          // 오답 처리 - X표시 추가
+          // 오답 처리 - 목숨 차감 및 X표시 추가
           const newLives = lives - 1;
           setLives(newLives);
           
@@ -286,7 +328,7 @@ function GamePage({ onNavigate, sessionId }) {
     
     try {
       // 스테이지 완료 요청
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -310,7 +352,7 @@ function GamePage({ onNavigate, sessionId }) {
         } else if (data.status === 'playing' && data.next_puzzle) {
           // 바로 playing 상태면 다음 퍼즐로 전환
           moveToNextStage(data);
-        } else if (!data.next_puzzle) {
+        } else if (data.status === 'finished' && !data.next_puzzle) {
           // 더 이상 스테이지가 없으면 게임 종료
           alert('모든 게임을 완료했습니다!');
           endGame();
@@ -329,7 +371,7 @@ function GamePage({ onNavigate, sessionId }) {
   const pollNextPuzzle = () => {
     const pollInterval = setInterval(async () => {
       try {
-        const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
+        const response = await fetch(`/api/v1/games/${gameRoomId}/stages/${currentStage}/complete`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -348,7 +390,7 @@ function GamePage({ onNavigate, sessionId }) {
             clearInterval(pollInterval);
             console.log('다음 퍼즐 준비 완료! 전환 시작');
             moveToNextStage(data);
-          } else if (!data.next_puzzle) {
+          } else if (data.status === 'finished' && !data.next_puzzle) {
             // 다음 퍼즐이 없으면 게임 종료
             clearInterval(pollInterval);
             alert('모든 게임을 완료했습니다!');
@@ -397,7 +439,7 @@ function GamePage({ onNavigate, sessionId }) {
     
     try {
       // 게임 종료 요청
-      const response = await fetch(`${process.env.REACT_APP_API_URL}/api/v1/games/${gameRoomId}/finish`, {
+      const response = await fetch(`/api/v1/games/${gameRoomId}/finish`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -414,23 +456,45 @@ function GamePage({ onNavigate, sessionId }) {
         // 최종 점수 저장
         setFinalScore(data.final_score);
         setIsGameOver(true);
+        
+        // 게임 종료 시 localStorage 정리
+        localStorage.removeItem('currentGameRoomId');
       } else {
         console.error('게임 종료 요청 실패:', response.status);
         setIsGameOver(true);
+        localStorage.removeItem('currentGameRoomId');
       }
     } catch (error) {
       console.error('게임 종료 에러:', error);
       setIsGameOver(true);
+      localStorage.removeItem('currentGameRoomId');
     }
   };
 
   // 돌아가기
   const handleGoBack = () => {
+    // 게임 진행 중이면 확인 메시지
+    if (!isGameOver) {
+      const confirmLeave = window.confirm(
+        '게임을 중단하고 나가시겠습니까?\n' +
+        '현재 진행 상태는 저장되지 않습니다.'
+      );
+      
+      if (!confirmLeave) {
+        return; // 취소 시 아무것도 하지 않음
+      }
+    }
+    
+    // 게임 종료 처리
     clearInterval(timerRef.current);
     setCurrentImageIndex(0);
     setCorrectAnswers([]);
     setWrongAnswers([]);
     setIsGameOver(false);
+    
+    // localStorage에서 게임 ID 제거
+    localStorage.removeItem('currentGameRoomId');
+    
     onNavigate('home');
   };
 

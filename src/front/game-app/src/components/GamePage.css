@@ -97,14 +97,13 @@
 
 .correct-mark {
   position: absolute;
-  width: 40px;
-  height: 40px;
+  /* width와 height는 인라인 스타일로 동적 설정 */
   border: 3px solid #e74c3c;
-  border-radius: 50%;
-  transform: translate(-50%, -50%);
+  border-radius: 8px; /* 직사각형 모서리 둥글게 */
   pointer-events: none;
   animation: markAppear 0.3s ease-out;
   background-color: rgba(231, 76, 60, 0.2);
+  box-shadow: 0 0 10px rgba(231, 76, 60, 0.5);
 }
 
 .wrong-mark {
@@ -125,10 +124,16 @@
 
 @keyframes markAppear {
   0% {
-    transform: translate(-50%, -50%) scale(0);
+    transform: scale(0);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.1);
+    opacity: 0.8;
   }
   100% {
-    transform: translate(-50%, -50%) scale(1);
+    transform: scale(1);
+    opacity: 1;
   }
 }
 
