@@ -18,6 +18,8 @@ from app.models.upload_slot import GameUploadSlot
 from app.worker.celery_app import celery_app
 from app.worker.detect import modify_image_with_imagen
 
+MAX_SIZE_BYTES = 27_000_000
+
 
 def _calculate_overlap_ratio(
     child_box: dict[str, float], parent_box: dict[str, float]
@@ -215,6 +217,25 @@ def _process_rects_with_iou(
     return processed_rects, processed_labels
 
 
+def _reduce_image_size(image_bytes: bytes, limit: int = MAX_SIZE_BYTES) -> bytes:
+    current_bytes = image_bytes
+
+    while len(current_bytes) > limit:
+        with Image.open(io.BytesIO(current_bytes)) as img:
+            img = img.convert("RGB")
+
+            new_width = max(1, int(img.width * 0.7))
+            new_height = max(1, int(img.height * 0.7))
+
+            img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+            with io.BytesIO() as output:
+                img.save(output, format="PNG")
+                current_bytes = output.getvalue()
+
+    return current_bytes
+
+
 @celery_app.task
 def long_running_task(param: int) -> str:
     time.sleep(10)
@@ -247,6 +268,15 @@ def detect_objects_for_slot(slot_id: int):
         )
 
         image_bytes = s3_response["Body"].read()
+
+        if len(image_bytes) > MAX_SIZE_BYTES:
+            image_bytes = _reduce_image_size(image_bytes, limit=MAX_SIZE_BYTES)
+            s3_client.put_object(
+                Bucket=settings.aws_s3_bucket_name,
+                Key=slot.s3_object_key,
+                Body=image_bytes,
+                ContentType="image/png",
+            )
 
         with Image.open(io.BytesIO(image_bytes)) as img:
             image_width, image_height = img.size
