@@ -38,12 +38,12 @@ sequenceDiagram
     
     C->>R: Task 수신 (detect_objects_for_slot)
     C->>S3: 이미지 다운로드
-    C->>C: Gemini API로 객체 탐지
+    C->>C: Vision API로 객체 탐지
     C->>DB: detected_objects 저장
     C->>R: 다음 Task 전송 (edit_image_with_imagen3)
     
     C->>R: Task 수신 (edit_image_with_imagen3)
-    C->>C: Gemini Imagen으로 이미지 수정
+    C->>C: Imagen으로 이미지 수정
     C->>S3: 수정된 이미지 업로드
     C->>DB: Puzzle 생성, GameStage 생성
     C->>DB: Game.status = "playing" 업데이트
@@ -142,7 +142,7 @@ sequenceDiagram
     participant C as Celery Worker
     participant DB as PostgreSQL
     participant S3 as AWS S3
-    participant G as Gemini API
+    participant V as Vision API
     participant I as Imagen API
 
     Note over C: Task 1: detect_objects_for_slot(slot_id)
@@ -153,9 +153,9 @@ sequenceDiagram
     C->>S3: GetObject (원본 이미지)
     S3-->>C: image_bytes
     
-    C->>G: Gemini 2.5 Flash<br/>객체 탐지 요청
-    Note over G: 5개 객체 선택<br/>box_2d 좌표 반환
-    G-->>C: detected_objects[]
+    C->>V: Vision API<br/>객체 탐지 요청
+    Note over V: 5개 객체 선택<br/>box_2d 좌표 반환
+    V-->>C: detected_objects[]
     
     C->>DB: GameUploadSlot.detected_objects 저장
     C->>DB: analysis_status = "completed"
@@ -167,7 +167,7 @@ sequenceDiagram
     C->>C: 탐지된 객체로 마스크 생성
     C->>C: modification_idea로 프롬프트 생성
     
-    C->>I: Gemini Imagen 3<br/>이미지 편집 요청
+    C->>I: Imagen 3<br/>이미지 편집 요청
     Note over I: 마스크 영역만 수정<br/>나머지는 원본 유지
     I-->>C: modified_image_bytes
     
@@ -276,7 +276,7 @@ graph TB
     end
 
     subgraph "Google Cloud"
-        Gemini[Gemini API<br/>Object Detection]
+        Vision[Vision API<br/>Object Detection]
         Imagen[Imagen API<br/>Image Edit]
     end
 
@@ -291,7 +291,7 @@ graph TB
     Celery -->|Consume Tasks| Redis
     Celery -->|SQL| PostgreSQL
     Celery -->|Upload/Download| S3
-    Celery -->|API Call| Gemini
+    Celery -->|API Call| Vision
     Celery -->|API Call| Imagen
 
     style Browser fill:#e1f5ff
@@ -301,6 +301,6 @@ graph TB
     style Redis fill:#ffe1e1
     style PostgreSQL fill:#e1ffe1
     style S3 fill:#e1ffe1
-    style Gemini fill:#fff3e1
+    style Vision fill:#fff3e1
     style Imagen fill:#fff3e1
 ```
