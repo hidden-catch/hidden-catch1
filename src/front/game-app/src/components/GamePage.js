@@ -116,6 +116,13 @@ function GamePage({ onNavigate, sessionId }) {
       const data = await response.json();
       console.log('[loadGameData] 게임 데이터 로드:', data);
       
+      if (!data.puzzle) {
+        console.error('[loadGameData] puzzle 데이터가 없습니다:', data);
+        alert('퍼즐 데이터를 불러오지 못했습니다. 게임을 다시 시작해주세요.');
+        onNavigate('home');
+        return;
+      }
+      
       setGameData(data);
       setPuzzleData(data.puzzle);
       setCurrentStage(data.current_stage || 0);
