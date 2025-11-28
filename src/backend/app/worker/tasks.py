@@ -236,13 +236,13 @@ def _reduce_image_size(image_bytes: bytes, limit: int = MAX_SIZE_BYTES) -> bytes
     return current_bytes
 
 
-@celery_app.task
+@celery_app.task(serializer='json')
 def long_running_task(param: int) -> str:
     time.sleep(10)
     return f"Proceed {param} successfully!"
 
 
-@celery_app.task
+@celery_app.task(serializer='json')
 def detect_objects_for_slot(slot_id: int):
     """
     1. GameUploadSlot에서 슬롯 가져오기
@@ -487,7 +487,7 @@ def detect_objects_for_slot(slot_id: int):
     }
 
 
-@celery_app.task
+@celery_app.task(serializer='json')
 def edit_image_with_imagen3(payload: dict):
     slot_id = payload["slot_id"]
     detected = payload["detected"]
@@ -608,7 +608,7 @@ def edit_image_with_imagen3(payload: dict):
         slot.last_analyzed_at = datetime.now()
 
 
-@celery_app.task
+@celery_app.task(serializer='json')
 def run_imagen_pipeline(slot_id: int) -> None:
     chain(
         detect_objects_for_slot.s(slot_id),
