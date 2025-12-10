@@ -89,8 +89,24 @@ function GamePage({ onNavigate, sessionId }) {
       loadGameData(storedGameRoomId);
     }
 
+    // beforeunload: 페이지를 떠나거나 새로고침할 때
+    const handleBeforeUnload = (e) => {
+      // 게임 진행 중일 때만 경고 표시
+      if (gameRoomId && !isGameOver) {
+        e.preventDefault();
+        // Chrome에서는 returnValue 설정이 필요
+        e.returnValue = '게임을 종료하시겠습니까? 진행 중인 게임이 저장되지 않습니다.';
+        return e.returnValue;
+      }
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
     return () => {
       console.log('[GamePage] cleanup 실행됨');
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      
+      // 폴링 및 타이머 정리
       if (timerRef.current) {
         clearInterval(timerRef.current);
       }
@@ -99,7 +115,7 @@ function GamePage({ onNavigate, sessionId }) {
       }
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [gameRoomId, isGameOver]);
 
   // 게임 데이터 로드
   const loadGameData = async (gameId) => {
