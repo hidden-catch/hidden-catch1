@@ -178,7 +178,10 @@ class GameService:
         slot.last_analyzed_at = None
         self._validate_upload_content_type(slot.s3_object_key)
         self.session.commit()
-        run_imagen_pipeline.delay(slot.id)
+        run_imagen_pipeline.apply_async(
+            args=[slot.id],
+            serializer='json'
+        )
 
         slots = (
             self.session.query(GameUploadSlot)

@@ -613,4 +613,4 @@ def run_imagen_pipeline(slot_id: int) -> None:
     chain(
         detect_objects_for_slot.s(slot_id),
         edit_image_with_imagen3.s(),
-    ).delay()
+    ).apply_async(serializer='json')
