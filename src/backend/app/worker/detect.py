@@ -1,6 +1,5 @@
 import io
 import json
-import os
 from typing import Sequence, cast
 
 from google import genai
@@ -11,10 +10,6 @@ from pydantic import BaseModel
 from vertexai.preview.vision_models import Image, ImageGenerationModel
 
 from app.core.config import settings
-
-# GCP 서비스 계정 키 설정
-if settings.google_application_credentials:
-    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = settings.google_application_credentials
 
 
 class DetectedObjects(BaseModel):

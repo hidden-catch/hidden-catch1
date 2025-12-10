@@ -22,10 +22,6 @@ def create_app() -> FastAPI:
 
     app.include_router(api_router, prefix="/api/v1")
 
-    @app.get("/healthz")
-    def healthcheck():
-        return {"status": "healthy"}
-
     return app
 
 
