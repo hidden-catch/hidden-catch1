@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y \
 RUN pip install --no-cache-dir uv
 
 # 의존성 파일 복사
-COPY pyproject.toml ./
+COPY pyproject.toml uv.lock ./
 
 # uv를 사용하여 의존성 설치
 RUN uv pip install --system -r pyproject.toml
