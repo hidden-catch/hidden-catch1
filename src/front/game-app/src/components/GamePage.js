@@ -399,12 +399,12 @@ function GamePage({ onNavigate, sessionId }) {
 
           // status가 "playing"으로 바뀌면 다음 스테이지로 전환
           if (data.status === 'playing' && data.next_puzzle) {
-            clearInterval(pollInterval);
+            clearInterval(pollIntervalRef.current);
             console.log('다음 퍼즐 준비 완료! 전환 시작');
             moveToNextStage(data);
           } else if (data.status === 'finished' && !data.next_puzzle) {
             // 다음 퍼즐이 없으면 게임 종료
-            clearInterval(pollInterval);
+            clearInterval(pollIntervalRef.current);
             alert('모든 게임을 완료했습니다!');
             endGame();
           }
