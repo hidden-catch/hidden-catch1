@@ -1,7 +1,7 @@
 import React from 'react';
 import './Header.css';
 
-function Header({ onNavigate }) {
+function Header({ onNavigate, currentPage }) {
   const handleLogin = () => {
     // TODO: 로그인 기능 구현
     console.log('로그인 클릭');
@@ -18,9 +18,25 @@ function Header({ onNavigate }) {
   };
 
   const handleGoHome = () => {
-    if (onNavigate) {
-      onNavigate('home');
+    if (!onNavigate) return;
+
+    // 게임 페이지에서 홈으로 이동할 때 확인
+    if (currentPage === 'game') {
+      const gameRoomId = localStorage.getItem('currentGameRoomId');
+      
+      // 게임이 진행 중인 경우에만 확인
+      if (gameRoomId) {
+        const confirmed = window.confirm(
+          '게임을 종료하시겠습니까?\n진행 중인 게임 데이터가 저장되지 않습니다.'
+        );
+        
+        if (!confirmed) {
+          return;
+        }
+      }
     }
+    
+    onNavigate('home');
   };
 
   return (

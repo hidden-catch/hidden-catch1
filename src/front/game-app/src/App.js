@@ -25,6 +25,10 @@ function App() {
     }
   }, []);
 
+  const handleNavigate = (page) => {
+    setCurrentPage(page);
+  };
+
   return (
     <div className="App">
       <div className="background-animation">
@@ -34,24 +38,24 @@ function App() {
         <div className="circle circle-4"></div>
         <div className="circle circle-5"></div>
       </div>
-      <Header onNavigate={setCurrentPage} />
+      <Header onNavigate={handleNavigate} currentPage={currentPage} />
       
       <main className="main-content">
         {currentPage === 'home' && (
           <HomePage 
-            onNavigate={setCurrentPage}
+            onNavigate={handleNavigate}
           />
         )}
         
         {currentPage === 'upload' && (
           <ImageUploadPage 
-            onNavigate={setCurrentPage}
+            onNavigate={handleNavigate}
           />
         )}
         
         {currentPage === 'game' && (
           <GamePage 
-            onNavigate={setCurrentPage}
+            onNavigate={handleNavigate}
             sessionId={sessionId}
           />
         )}
